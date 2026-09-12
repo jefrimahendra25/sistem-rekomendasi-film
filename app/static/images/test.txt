@@ -1,0 +1,1 @@
+File test untuk memeriksa akses ke direktori static/images

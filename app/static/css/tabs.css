@@ -1,0 +1,123 @@
+/* Filter Section */
+.filters {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1rem;
+    padding: 1rem var(--spacing-unit);
+    background: #f8f9fa;
+    border-top: 1px solid #e9ecef;
+}
+
+.filter-group {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.filter-group label {
+    font-size: 0.9rem;
+    color: var(--text-color);
+    font-weight: 500;
+}
+
+.filter-select {
+    padding: 0.5rem 1rem;
+    border: 1px solid #ced4da;
+    border-radius: 4px;
+    font-size: 0.9rem;
+    color: var(--text-color);
+    background-color: white;
+    cursor: pointer;
+    transition: border-color 0.2s;
+}
+
+.filter-select:focus {
+    border-color: var(--primary-color);
+    outline: none;
+    box-shadow: 0 0 0 0.2rem rgba(13, 110, 253, 0.25);
+}
+
+.clear-filters {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.5rem 1rem;
+    background-color: #f8f9fa;
+    border: 1px solid #dc3545;
+    color: #dc3545;
+    border-radius: 4px;
+    font-size: 0.9rem;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.clear-filters:hover {
+    background-color: #dc3545;
+    color: white;
+}
+
+.clear-filters i {
+    font-size: 0.8rem;
+}
+
+/* Tabs and Sections */
+.tabs-container {
+    background: var(--white);
+    box-shadow: var(--shadow);
+    margin-bottom: 2rem;
+    position: sticky;
+    top: var(--header-height);
+    z-index: 90;
+}
+
+.tabs {
+    display: flex;
+    border-bottom: 1px solid var(--medium-gray);
+    padding: 0 var(--spacing-unit);
+    overflow-x: auto;
+    scrollbar-width: none; /* Firefox */
+}
+
+.tabs::-webkit-scrollbar {
+    display: none; /* Chrome, Safari, Opera */
+}
+
+.tab {
+    padding: 1rem 1.5rem;
+    font-weight: 500;
+    color: var(--text-light);
+    cursor: pointer;
+    border-bottom: 3px solid transparent;
+    transition: var(--transition);
+    white-space: nowrap;
+}
+
+.tab:hover {
+    color: var(--primary-color);
+}
+
+.tab.active {
+    color: var(--primary-color);
+    border-bottom-color: var(--primary-color);
+}
+
+/* Movie Sections */
+.movie-section {
+    display: none;
+    padding: 2rem 0;
+}
+
+.movie-section.active {
+    display: block;
+    animation: fadeIn 0.3s ease-in-out;
+}
+
+@keyframes fadeIn {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}
+
+/* Ensure the first tab is active by default */
+#trending {
+    display: block;
+}

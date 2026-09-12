@@ -1,0 +1,99 @@
+version: '3.8'
+
+services:
+  # Main application
+  app:
+    build: .
+    container_name: filmku-api
+    ports:
+      - "5002:5000"
+    environment:
+      - FLASK_ENV=production
+      - DATABASE_URL=postgresql://filmuser:filmpass@db:5432/filmku
+      - REDIS_URL=redis://redis:6379/0
+      - SECRET_KEY=${SECRET_KEY:-your-production-secret-key-change-this}
+      - TMDB_API_KEY=${TMDB_API_KEY}
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-http://localhost:3000,https://yourdomain.com}
+      - RATELIMIT_DEFAULT=1000 per day, 100 per hour
+      - CACHE_TYPE=redis
+      - SENTRY_DSN=${SENTRY_DSN}
+    volumes:
+      - ./logs:/app/logs
+      - ./Data:/app/Data
+    depends_on:
+      - db
+      - redis
+    restart: unless-stopped
+    networks:
+      - filmku-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # PostgreSQL Database
+  db:
+    image: postgres:15-alpine
+    container_name: filmku-db
+    environment:
+      - POSTGRES_DB=filmku
+      - POSTGRES_USER=filmuser
+      - POSTGRES_PASSWORD=filmpass
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "5432:5432"
+    restart: unless-stopped
+    networks:
+      - filmku-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U filmuser -d filmku"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis Cache
+  redis:
+    image: redis:7-alpine
+    container_name: filmku-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+    networks:
+      - filmku-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+  # Nginx Reverse Proxy (Optional)
+  nginx:
+    image: nginx:alpine
+    container_name: filmku-nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./ssl:/etc/nginx/ssl:ro
+    depends_on:
+      - app
+    restart: unless-stopped
+    networks:
+      - filmku-network
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+
+networks:
+  filmku-network:
+    driver: bridge

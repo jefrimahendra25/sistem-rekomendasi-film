@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="id" class="scroll-smooth">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Temukan rekomendasi film Indonesia terbaik dan terbaru">
+    <title>FilmKu - Rekomendasi Film Indonesia</title>
+    
+    <!-- Favicon -->
+    <link rel="icon" href="{{ url_for('static', filename='favicon.ico') }}">
+    
+    <!-- Stylesheets -->
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/main.css') }}?v=3.0.1">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
+    
+    <!-- API Configuration -->
+    <meta name="api-key" content="{{ api_key if api_key else 'ed6196ce9e32a462ca8ad5a7d43ae0e2' }}">
+    <meta name="default-poster" content="{{ url_for('static', filename='images/no-poster.svg') }}">
+</head>
+<body>
+    <!-- Loading Indicator -->
+    <div id="loading-indicator">
+        <div class="spinner"></div>
+        <p>Memuat Film...</p>
+    </div>
+
+    <!-- Error Container -->
+    <div id="error-container" class="error-message"></div>
+
+    <!-- Header -->
+    <header class="header">
+        <nav class="navbar">
+            <div class="container">
+                <a href="/" class="logo">FilmKu</a>
+                <div class="search-container">
+                    <input type="text" id="search-input" placeholder="Cari film..." aria-label="Cari film">
+                    <button id="search-button" aria-label="Cari"><i class="fas fa-search"></i></button>
+                </div>
+                <button class="mobile-menu-button" aria-label="Menu">
+                    <i class="fas fa-bars"></i>
+                </button>
+            </div>
+        </nav>
+    </header>
+
+    <main class="main-content">
+        <!-- Hero Section -->
+        <section class="hero">
+            <div class="hero-content">
+                <h1>Temukan Film Terbaik</h1>
+                <p>Rekomendasi film Indonesia terbaru dan terpopuler</p>
+                <div class="hero-buttons">
+                    <a href="#trending" class="btn btn-primary">Lihat Trending</a>
+                    <a href="#latest" class="btn btn-secondary">Film Terbaru</a>
+                </div>
+            </div>
+        </section>
+
+        <!-- Movie Sections -->
+        <section id="trending" class="movie-section">
+            <div class="container">
+                <h2>Sedang Trending</h2>
+                <div class="movie-grid" id="trending-movies">
+                    <!-- Movies will be loaded here by JavaScript -->
+                </div>
+            </div>
+        </section>
+
+        <section id="latest" class="movie-section">
+            <div class="container">
+                <h2>Film Terbaru</h2>
+                <div class="movie-grid" id="latest-movies">
+                    <!-- Movies will be loaded here by JavaScript -->
+                </div>
+            </div>
+        </section>
+
+        <!-- Hasil Pencarian -->
+        <section id="search-results-section" class="movie-section" style="display: none;">
+            <div class="container">
+                <div class="section-header">
+                    <h2 class="section-title">Hasil Pencarian</h2>
+                    <div id="search-results-count" class="results-count">0 hasil ditemukan</div>
+                </div>
+                <div id="search-results" class="movie-grid"></div>
+            </div>
+        </section>
+    </main>
+
+    <!-- Movie Modal -->
+    <div id="movie-modal" class="modal">
+        <div class="modal-content">
+            <button class="modal-close">&times;</button>
+            <div class="modal-body">
+                <div class="modal-poster-container">
+                    <img id="modal-poster" class="modal-poster" src="" alt="Movie Poster">
+                </div>
+                <div class="modal-info">
+                    <h2 id="modal-title"></h2>
+                    <div class="modal-meta">
+                        <span id="modal-year"></span>
+                        <span class="modal-rating">
+                            <i class="fas fa-star"></i>
+                            <span id="modal-rating"></span>
+                        </span>
+                        <span id="modal-runtime"></span>
+                    </div>
+                    <div class="modal-genres" id="modal-genres">
+                        <!-- Genres will be added here -->
+                    </div>
+                    <h3>Sinopsis</h3>
+                    <p id="modal-overview" class="modal-overview"></p>
+                    <div class="modal-actions">
+                        <button id="watch-trailer" class="btn btn-primary">
+                            <i class="fas fa-play"></i> Tonton Trailer
+                        </button>
+                        <button id="add-to-favorites" class="btn btn-secondary">
+                            <i class="fas fa-heart"></i> Favorit
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <footer class="footer">
+        <div class="container">
+            <div class="footer-content">
+                <div class="social-links">
+                    <a href="#" aria-label="Facebook"><i class="fab fa-facebook-f"></i></a>
+                    <a href="#" aria-label="Twitter"><i class="fab fa-twitter"></i></a>
+                    <a href="#" aria-label="Instagram"><i class="fab fa-instagram"></i></a>
+                </div>
+                <div class="footer-links">
+                    <h3>Tautan Cepat</h3>
+                    <ul>
+                        <li><a href="#">Beranda</a></li>
+                        <li><a href="#trending">Trending</a></li>
+                        <li><a href="#latest">Terbaru</a></li>
+                        <li><a href="#">Genre</a></li>
+                        <li><a href="#">Tentang Kami</a></li>
+                    </ul>
+                </div>
+                <div class="footer-contact">
+                    <h3>Hubungi Kami</h3>
+                    <p><i class="fas fa-envelope"></i> info@filmku.com</p>
+                    <p><i class="fas fa-phone"></i> +62 123 4567 890</p>
+                    <p><i class="fas fa-map-marker-alt"></i> Jakarta, Indonesia</p>
+                </div>
+            </div>
+            <div class="copyright">
+                <p>&copy; <span id="current-year">2024</span> FilmKu. Semua Hak Dilindungi.</p>
+            </div>
+        </div>
+    </footer>
+
+    <!-- Back to Top Button -->
+    <button id="back-to-top" aria-label="Kembali ke atas">
+        <i class="fas fa-arrow-up"></i>
+    </button>
+
+    <!-- JavaScript -->
+    <script>
+        // Inisialisasi konfigurasi
+        window.APP_CONFIG = {
+            API_BASE_URL: 'https://api.themoviedb.org/3',
+            IMAGE_BASE_URL: 'https://image.tmdb.org/t/p',
+            API_KEY: document.querySelector('meta[name="api-key"]').getAttribute('content'),
+            DEFAULT_POSTER: document.querySelector('meta[name="default-poster"]').getAttribute('content'),
+            POSTER_SIZES: {
+                small: 'w185',
+                medium: 'w342',
+                large: 'w500',
+                original: 'original'
+            }
+        };
+
+        // Set tahun saat ini di footer
+        document.getElementById('current-year').textContent = new Date().getFullYear();
+
+        // Fungsi untuk menampilkan error
+        function showError(message) {
+            const errorContainer = document.getElementById('error-container');
+            if (errorContainer) {
+                errorContainer.textContent = message;
+                errorContainer.style.display = 'block';
+                setTimeout(() => {
+                    errorContainer.style.opacity = '0';
+                    setTimeout(() => {
+                        errorContainer.style.display = 'none';
+                        errorContainer.style.opacity = '1';
+                    }, 500);
+                }, 5000);
+            }
+            console.error(message);
+        }
+
+        // Handler untuk gambar error
+        document.addEventListener('DOMContentLoaded', function() {
+            // Handle gambar error
+            document.body.addEventListener('error', function(e) {
+                if (e.target.tagName === 'IMG') {
+                    e.target.src = window.APP_CONFIG.DEFAULT_POSTER;
+                    e.target.alt = 'Poster tidak tersedia';
+                }
+            }, true);
+
+            // Cek jika ada error saat memuat
+            if (!window.APP_CONFIG.API_KEY) {
+                showError('Peringatan: Kunci API tidak ditemukan. Beberapa fitur mungkin tidak berfungsi.');
+            }
+
+            // Sembunyikan loading indicator setelah semua konten dimuat
+            window.addEventListener('load', function() {
+                const loadingIndicator = document.getElementById('loading-indicator');
+                if (loadingIndicator) {
+                    setTimeout(() => {
+                        loadingIndicator.style.opacity = '0';
+                        setTimeout(() => {
+                            loadingIndicator.style.display = 'none';
+                        }, 500);
+                    }, 500);
+                }
+            });
+        });
+    </script>
+
+    <!-- Load JavaScript files -->
+    <script src="{{ url_for('static', filename='js/config.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+</body>
+</html>

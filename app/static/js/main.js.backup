@@ -1,0 +1,657 @@
+// Konfigurasi Aplikasi
+const App = (function() {   
+    'use strict';
+    
+    // Konfigurasi
+    const config = {
+        API_BASE_URL: window.location.origin + '/api',
+        API_KEY: '',
+        IMAGE_BASE_URL: 'https://image.tmdb.org/t/p/w500',
+        BACKDROP_BASE_URL: 'https://image.tmdb.org/t/p/original',
+        DEFAULT_POSTER: '/static/images/no-poster.svg',
+        LOCAL_IMAGE_BASE: '/static/images',
+        TMDB_IMAGE_BASE: 'https://image.tmdb.org/t/p/'
+    };
+    
+    // Fungsi untuk mendapatkan URL API
+    function getApiUrl(endpoint) {
+        return `${config.API_BASE_URL}${endpoint.startsWith('/') ? '' : '/'}${endpoint}`;
+    }
+    
+    // Fungsi untuk mendapatkan headers
+    function getHeaders() {
+        return {
+            'Content-Type': 'application/json',
+            'Accept': 'application/json'
+        };
+    }
+    
+    // Fungsi untuk mendapatkan URL gambar yang aman
+    function getSafeImageUrl(path) {
+        if (!path || ['nan', 'null', 'undefined', 'None', ''].includes(String(path).toLowerCase())) {
+            console.log('Path tidak valid, menggunakan gambar default');
+            return config.DEFAULT_POSTER;
+        }
+
+        try {
+            const cleanPath = String(path).trim();
+            
+            // Jika sudah URL lengkap
+            if (cleanPath.startsWith('http')) {
+                return cleanPath;
+            }
+            
+            // Jika path relatif TMDB
+            if (cleanPath.startsWith('/')) {
+                return `${config.TMDB_IMAGE_BASE}w500${cleanPath}`;
+            }
+            
+            // Default ke path relatif
+            return cleanPath;
+        } catch (error) {
+            console.error('Error in getSafeImageUrl:', error);
+            return config.DEFAULT_POSTER;
+        }
+    }
+
+    // Fungsi untuk membuat kartu film
+    function createMovieCard(movie) {
+        if (!movie || !movie.id) {
+            console.error('Data film tidak valid:', movie);
+            return null;
+        }
+
+        const card = document.createElement('div');
+        card.className = 'movie-card';
+        card.setAttribute('data-id', movie.id);
+        card.setAttribute('title', movie.title || 'Film tanpa judul');
+        
+        // Dapatkan URL poster yang aman
+        const posterUrl = getSafeImageUrl(movie.poster_path);
+        
+        // Buat elemen poster
+        const posterContainer = document.createElement('div');
+        posterContainer.className = 'movie-poster-container';
+        
+        const img = document.createElement('img');
+        img.className = 'movie-poster';
+        img.alt = movie.title || 'Poster Film';
+        img.loading = 'lazy';
+        img.decoding = 'async';
+        
+        // Atur sumber gambar dengan fallback
+        img.onerror = function() {
+            console.warn('Gagal memuat gambar:', {
+                attempted_url: this.src,
+                movie_id: movie.id,
+                movie_title: movie.title
+            });
+            if (this.src !== config.DEFAULT_POSTER) {
+                this.src = config.DEFAULT_POSTER;
+            }
+        };
+        
+        // Setel sumber gambar
+        img.src = posterUrl;
+        
+        // Tambahkan elemen rating jika tersedia
+        if (movie.vote_average) {
+            const rating = document.createElement('div');
+            rating.className = 'movie-rating';
+            rating.innerHTML = `
+                <i class="fas fa-star"></i>
+                <span>${parseFloat(movie.vote_average).toFixed(1)}</span>
+            `;
+            posterContainer.appendChild(rating);
+        }
+        
+        posterContainer.appendChild(img);
+        
+        // Buat elemen info film
+        const info = document.createElement('div');
+        info.className = 'movie-info';
+        
+        const title = document.createElement('h3');
+        title.className = 'movie-title';
+        title.textContent = movie.title || 'Judul tidak tersedia';
+        
+        // Tambahkan tahun rilis jika tersedia
+        if (movie.release_date) {
+            const year = document.createElement('div');
+            year.className = 'movie-year';
+            year.textContent = new Date(movie.release_date).getFullYear() || '';
+            info.appendChild(year);
+        }
+        
+        info.prepend(title);
+        
+        // Gabungkan semua elemen
+        card.appendChild(posterContainer);
+        card.appendChild(info);
+        
+        // Tambahkan event listener untuk menampilkan detail
+        card.addEventListener('click', () => {
+            if (typeof showMovieDetails === 'function') {
+                showMovieDetails(movie);
+            }
+        });
+        
+        return card;
+    }
+
+    // Ekspos fungsi yang diperlukan ke global scope
+    window.appConfig = config;
+    window.getSafeImageUrl = getSafeImageUrl;
+    window.createMovieCard = createMovieCard;
+})();
+
+// Fungsi untuk menangani error gambar
+function handleImageError(img) {
+    // Jika gambar gagal dimuat, gunakan gambar default
+    if (img.src !== config.DEFAULT_POSTER) {
+        console.warn('Gagal memuat gambar:', img.src);
+        img.src = config.DEFAULT_POSTER;
+        img.onerror = null; // Mencegah loop error jika gambar default juga gagal dimuat
+    }
+}
+
+// Fungsi Utama
+function showError(message) {
+    const errorContainer = document.getElementById('error-container') || createErrorContainer();
+    errorContainer.textContent = message;
+    errorContainer.style.display = 'block';
+    setTimeout(() => errorContainer.style.display = 'none', 5000);
+}
+
+// Tambahkan event listener untuk menangani error gambar
+document.addEventListener('DOMContentLoaded', () => {
+    document.body.addEventListener('error', function(e) {
+        if (e.target.tagName === 'IMG') {
+            handleImageError(e.target);
+        }
+    }, true);
+});
+
+function createErrorContainer() {
+    const container = document.createElement('div');
+    container.id = 'error-container';
+    document.body.appendChild(container);
+    return container;
+}
+
+// Fungsi untuk mengaktifkan tab
+function activateTab(tabId) {
+    console.log('Mengaktifkan tab:', tabId);
+    
+    try {
+        // Sembunyikan semua konten tab
+        const tabContents = document.querySelectorAll('.movies-section');
+        tabContents.forEach(content => {
+            content.classList.remove('active');
+        });
+        
+        // Nonaktifkan semua tab
+        const tabLinks = document.querySelectorAll('.tab-link');
+        tabLinks.forEach(link => {
+            link.classList.remove('active');
+        });
+        
+        // Aktifkan tab yang dipilih
+        const selectedTab = document.querySelector(`.tab-link[data-tab="${tabId}"]`);
+        const selectedContent = document.getElementById(tabId);
+        
+        if (selectedTab && selectedContent) {
+            selectedTab.classList.add('active');
+            selectedContent.classList.add('active');
+            
+            // Muat data jika belum dimuat
+            const movieGrid = selectedContent.querySelector('.movies-grid');
+            if (movieGrid && movieGrid.children.length === 0) {
+                loadMovies(tabId).catch(error => {
+                    console.error(`Gagal memuat film untuk tab ${tabId}:`, error);
+                });
+            }
+            console.log('Tab aktif:', selectedTab.textContent.trim());
+        } else {
+            console.error('Tab tidak ditemukan untuk:', tabId);
+            // Fallback ke tab pertama jika tab yang diminta tidak ditemukan
+            const firstTab = document.querySelector('.tab-link');
+            if (firstTab) {
+                const firstTabId = firstTab.getAttribute('data-tab');
+                if (firstTabId && firstTabId !== tabId) {
+                    console.log('Mengalihkan ke tab pertama:', firstTabId);
+                    return activateTab(firstTabId);
+                }
+            }
+            throw new Error(`Tab dengan ID ${tabId} tidak ditemukan`);
+        }
+    } catch (error) {
+        console.error('Error saat mengaktifkan tab:', error);
+        showError('Terjadi kesalahan saat memuat tab. Silakan coba lagi.');
+    }
+}
+
+// Fungsi untuk inisialisasi modal
+function initModal() {
+    console.log('Modal initialized');
+    // Tambahkan kode modal di sini
+}
+
+// Fungsi untuk memuat semua jenis film
+async function loadAllMovies() {
+    try {
+        // Tampilkan loading indicator
+        const loadingIndicator = document.getElementById('loading-indicator');
+        if (loadingIndicator) loadingIndicator.style.display = 'flex';
+        
+        // Muat ketiga jenis film sekaligus
+        const [popular, trending, newest] = await Promise.all([
+            fetch(`${config.API_BASE_URL}/movies?type=popular`).then(res => res.json()),
+            fetch(`${config.API_BASE_URL}/movies?type=trending`).then(res => res.json()),
+            fetch(`${config.API_BASE_URL}/movies?type=newest`).then(res => res.json())
+        ]);
+
+        console.log('Data popular:', popular);
+        console.log('Data trending:', trending);
+        console.log('Data newest:', newest);
+
+        // Tampilkan hasil
+        displayMovies('popular', popular.results || []);
+        displayMovies('trending', trending.results || []);
+        displayMovies('newest', newest.results || []);
+        
+        // Aktifkan tab popular secara default
+        activateTab('popular');
+        
+    } catch (error) {
+        console.error('Error loading all movies:', error);
+        showError('Gagal memuat data film. Silakan muat ulang halaman.');
+    } finally {
+        const loadingIndicator = document.getElementById('loading-indicator');
+        if (loadingIndicator) loadingIndicator.style.display = 'none';
+    }
+}
+
+// Fungsi untuk membuat kartu film
+function createMovieCard(movie) {
+    if (!movie) {
+        console.error('Movie data is null or undefined');
+        return null;
+    }
+    
+    console.log('Membuat kartu untuk film:', {
+        id: movie.id,
+        title: movie.title,
+        poster_path: movie.poster_path,
+        vote_average: movie.vote_average
+    });
+    
+    const card = document.createElement('div');
+    card.className = 'movie-card';
+    
+    // Dapatkan URL poster yang aman
+    const posterUrl = movie.poster_path ? getSafeImageUrl(movie.poster_path) : config.DEFAULT_POSTER;
+    console.log('Poster URL yang dihasilkan:', {
+        original_path: movie.poster_path,
+        processed_url: posterUrl
+    });
+    
+    // Buat elemen gambar
+    const imgContainer = document.createElement('div');
+    imgContainer.className = 'movie-poster';
+    
+    const img = document.createElement('img');
+    img.alt = movie.title || 'Poster Film';
+    img.loading = 'lazy';
+    img.crossOrigin = 'anonymous';
+    
+    // Tambahkan event handler untuk error gambar
+    img.onerror = function() {
+        console.warn('Gagal memuat gambar:', {
+            attempted_url: this.src,
+            original_path: movie.poster_path,
+            movie_id: movie.id,
+            movie_title: movie.title
+        });
+        if (this.src !== config.DEFAULT_POSTER) {
+            this.src = config.DEFAULT_POSTER;
+        }
+    };
+    
+    // Tambahkan log saat gambar berhasil dimuat
+    img.onload = function() {
+        console.log('Gambar berhasil dimuat:', this.src);
+    };
+    
+    // Setel sumber gambar setelah menambahkan event handler
+    img.src = posterUrl;
+    
+    // Tambahkan gambar ke container
+    imgContainer.appendChild(img);
+    
+    // Buat elemen info film
+    const movieInfo = document.createElement('div');
+    movieInfo.className = 'movie-info';
+    
+    // Format rating
+    const rating = movie.vote_average ? 
+        `<i class="fas fa-star"></i> ${parseFloat(movie.vote_average).toFixed(1)}` : 'N/A';
+    
+    movieInfo.innerHTML = `
+        <h3>${movie.title || 'Judul Tidak Tersedia'}</h3>
+        <span class="rating">${rating}</span>
+    `;
+    
+    // Tambahkan elemen ke kartu
+    card.appendChild(imgContainer);
+    card.appendChild(movieInfo);
+    
+    // Tambahkan event listener untuk menampilkan detail film saat diklik
+    card.addEventListener('click', () => {
+        showMovieDetails(movie);
+    });
+    
+    return card;
+}
+
+// Fungsi untuk menampilkan film ke dalam container
+function displayMovies(type, movies) {
+    const container = document.getElementById(`${type}-movies`);
+    if (!container) {
+        console.error(`Container with ID '${type}-movies' not found`);
+        return;
+    }
+    
+    container.innerHTML = '';
+    
+    if (!movies || movies.length === 0) {
+        console.warn(`Tidak ada film yang tersedia untuk ${type}`);
+        container.innerHTML = `
+            <div class="no-results">
+                <i class="fas fa-film"></i>
+                <p>Tidak ada film yang tersedia</p>
+            </div>`;
+        return;
+    }
+    
+    // Buat fragment untuk performa yang lebih baik
+    const fragment = document.createDocumentFragment();
+    let hasValidMovies = false;
+    
+    movies.forEach((movie) => {
+        try {
+            if (movie && movie.id) {
+                const card = createMovieCard(movie);
+                if (card) {
+                    fragment.appendChild(card);
+                    hasValidMovies = true;
+                }
+            }
+        } catch (e) {
+            console.error('Error creating movie card:', e, movie);
+        }
+    });
+    
+    if (hasValidMovies) {
+        container.appendChild(fragment);
+    } else {
+        container.innerHTML = `
+            <div class="no-results">
+                <i class="fas fa-exclamation-triangle"></i>
+                <p>Gagal memuat daftar film</p>
+            </div>`;
+    }
+}
+
+// Fungsi untuk membuat kartu film
+function createMovieCard(movie) {
+    if (!movie || !movie.id) {
+        console.error('Data film tidak valid:', movie);
+        return null;
+    }
+
+    // Buat elemen kartu
+    const card = document.createElement('div');
+    card.className = 'movie-card';
+    card.setAttribute('data-id', movie.id);
+    card.setAttribute('title', movie.title || 'Film tanpa judul');
+    
+    // Dapatkan URL poster yang aman
+    const posterUrl = getSafeImageUrl(movie.poster_path);
+    
+    // Buat elemen poster
+    const posterContainer = document.createElement('div');
+    posterContainer.className = 'movie-poster-container';
+    
+    const img = document.createElement('img');
+    img.className = 'movie-poster';
+    img.alt = movie.title || 'Poster Film';
+    img.loading = 'lazy';
+    img.decoding = 'async';
+    
+    // Atur sumber gambar dengan fallback
+    img.onerror = function() {
+        if (this.src !== config.DEFAULT_POSTER) {
+            this.src = config.DEFAULT_POSTER;
+        }
+    };
+    img.src = posterUrl;
+    
+    // Tambahkan elemen rating jika tersedia
+    if (movie.vote_average) {
+        const rating = document.createElement('div');
+        rating.className = 'movie-rating';
+        rating.innerHTML = `
+            <i class="fas fa-star"></i>
+            <span>${parseFloat(movie.vote_average).toFixed(1)}</span>
+        `;
+        posterContainer.appendChild(rating);
+    }
+    
+    posterContainer.appendChild(img);
+    
+    // Buat elemen info film
+    const info = document.createElement('div');
+    info.className = 'movie-info';
+    
+    const title = document.createElement('h3');
+    title.className = 'movie-title';
+    title.textContent = movie.title || 'Judul tidak tersedia';
+    
+    // Tambahkan tahun rilis jika tersedia
+    if (movie.release_date) {
+        const year = document.createElement('div');
+        year.className = 'movie-year';
+        year.textContent = new Date(movie.release_date).getFullYear() || '';
+        info.appendChild(year);
+    }
+    
+    info.prepend(title);
+    
+    // Gabungkan semua elemen
+    card.appendChild(posterContainer);
+    card.appendChild(info);
+    
+    // Tambahkan event listener untuk menampilkan detail
+    card.addEventListener('click', () => {
+        if (typeof showMovieDetails === 'function') {
+            showMovieDetails(movie);
+        }
+    });
+    
+    return card;
+}
+
+// Ganti fungsi yang ada dengan yang ini
+function getSafeImageUrl(path) {
+    if (!path || ['nan', 'null', 'undefined', 'None', ''].includes(String(path).toLowerCase())) {
+        console.log('Menggunakan gambar default');
+        return config.DEFAULT_POSTER;
+    }
+    try {
+        // Default poster path
+        const defaultPoster = '/static/images/no-poster.svg';
+        
+        // Jika path kosong atau tidak valid
+        if (!path || ['nan', 'null', 'undefined', 'None', ''].includes(String(path).toLowerCase())) {
+            console.log('Path tidak valid, menggunakan gambar default');
+            return defaultPoster;
+        }
+
+        // Konversi ke string dan hapus spasi
+        const cleanPath = String(path).trim();
+        
+        // Jika path sudah URL lengkap
+        if (cleanPath.startsWith('http')) {
+            return cleanPath;
+        }
+        
+        // Jika path relatif TMDB
+        if (cleanPath.startsWith('/')) {
+            return `https://image.tmdb.org/t/p/w500${cleanPath}`;
+        }
+        
+        // Default ke path relatif
+        return cleanPath.startsWith('/') ? cleanPath : `/${cleanPath}`;
+        
+    } catch (error) {
+        console.error('Error in getSafeImageUrl:', error);
+        return '/static/images/no-poster.svg';
+    }
+}
+// Fungsi untuk mencari film
+async function searchMovies(query) {
+    try {
+        if (!query.trim()) return;
+        
+        const loadingIndicator = document.getElementById('loading-indicator');
+        if (loadingIndicator) loadingIndicator.style.display = 'flex';
+
+        const response = await fetch(`/api/search?q=${encodeURIComponent(query)}`);
+        if (!response.ok) throw new Error('Pencarian gagal');
+
+        const results = await response.json();
+        const container = document.getElementById('search-results');
+        const countElement = document.getElementById('search-results-count');
+        
+        if (!container) return;
+
+        container.innerHTML = '';
+        if (results.length === 0) {
+            container.innerHTML = '<div class="no-results">Tidak ada hasil yang ditemukan</div>';
+            if (countElement) countElement.textContent = '0 hasil ditemukan';
+            return;
+        }
+
+        if (countElement) countElement.textContent = `${results.length} hasil ditemukan`;
+        results.forEach(movie => {
+            const card = createMovieCard(movie);
+            if (card) container.appendChild(card);
+        });
+
+    } catch (error) {
+        showError('Gagal melakukan pencarian. Silakan coba lagi.');
+        console.error('Error:', error);
+    } finally {
+        const loadingIndicator = document.getElementById('loading-indicator');
+        if (loadingIndicator) loadingIndicator.style.display = 'none';
+    }
+}
+
+    // Fungsi untuk memuat film berdasarkan jenis
+    async function loadMovies(type) {
+        console.log(`Memuat film ${type}...`);
+        const container = document.getElementById(`${type}-movies`);
+        if (!container) {
+            console.error(`Container untuk ${type} tidak ditemukan`);
+            return;
+        }
+        
+        try {
+            // Tampilkan loading indicator
+            container.innerHTML = '<div class="loading">Memuat film...</div>';
+            
+            // Panggil API untuk mendapatkan daftar film
+            const response = await fetch(`${config.API_BASE_URL}/movies?type=${type}`);
+            if (!response.ok) {
+                throw new Error(`HTTP error! status: ${response.status}`);
+            }
+            
+            const data = await response.json();
+            
+            // Kosongkan container
+            container.innerHTML = '';
+            
+            // Tampilkan film
+            if (data.movies && data.movies.length > 0) {
+                data.movies.forEach(movie => {
+                    const movieCard = createMovieCard(movie);
+                    container.appendChild(movieCard);
+                });
+            } else {
+                container.innerHTML = '<div class="no-results">Tidak ada film yang ditemukan.</div>';
+            }
+        } catch (error) {
+            console.error(`Gagal memuat film ${type}:`, error);
+            container.innerHTML = `<div class="error">Gagal memuat film. Silakan coba lagi nanti.</div>`;
+        }
+    }
+
+    // Ekspos fungsi yang diperlukan ke global scope
+    window.appConfig = config;
+    window.getSafeImageUrl = getSafeImageUrl;
+    window.createMovieCard = createMovieCard;
+    window.loadMovies = loadMovies;
+    
+    // Inisialisasi saat dokumen siap
+    document.addEventListener('DOMContentLoaded', () => {
+        console.log('Dokumen siap, menginisialisasi...');
+        
+        // Inisialisasi modal
+        initModal();
+        
+        // Muat film populer secara default
+        loadMovies('popular');
+        
+        // Tambahkan event listener untuk tab
+        const tabs = document.querySelectorAll('.tab-link');
+        tabs.forEach(tab => {
+            tab.addEventListener('click', (e) => {
+                e.preventDefault();
+                const tabId = tab.getAttribute('data-tab');
+                if (tabId) {
+                    activateTab(tabId);
+                }
+            });
+        });
+        
+        // Muat semua film saat pertama kali dimuat
+        loadAllMovies()
+            .then(() => console.log('Semua film berhasil dimuat'))
+            .catch(err => console.error('Gagal memuat film:', err));
+        
+        // Event listener untuk pencarian
+        const searchButton = document.getElementById('search-button');
+        const searchInput = document.getElementById('search-input');
+        
+        function handleSearch() {
+            const query = searchInput.value.trim();
+            console.log('Mencari:', query);
+            if (query) {
+                searchMovies(query);
+            }
+        }
+        
+        if (searchButton && searchInput) {
+            searchButton.addEventListener('click', handleSearch);
+            searchInput.addEventListener('keypress', (e) => {
+                if (e.key === 'Enter') handleSearch();
+            });
+        }
+        
+        // Aktifkan tab popular secara default
+        console.log('Mengaktifkan tab default...');
+        activateTab('popular');
+        
+        console.log('Inisialisasi selesai');
+    });

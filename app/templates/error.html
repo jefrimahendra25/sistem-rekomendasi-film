@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Error - FilmKu</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <style>
+        .error-container {
+            max-width: 800px;
+            margin: 50px auto;
+            padding: 20px;
+            text-align: center;
+        }
+        .error-message {
+            color: #e74c3c;
+            font-size: 1.2em;
+            margin: 20px 0;
+        }
+        .error-details {
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 5px;
+            margin: 20px 0;
+            text-align: left;
+            font-family: monospace;
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+        .btn {
+            display: inline-block;
+            background: #3498db;
+            color: white;
+            padding: 10px 20px;
+            border-radius: 5px;
+            text-decoration: none;
+            margin-top: 20px;
+        }
+        .btn:hover {
+            background: #2980b9;
+        }
+    </style>
+</head>
+<body>
+    <div class="error-container">
+        <div class="error-content">
+            <h1>❌ Terjadi Kesalahan</h1>
+            
+            {% if message %}
+                <div class="error-message">{{ message }}</div>
+            {% else %}
+                <div class="error-message">Maaf, terjadi kesalahan saat memproses permintaan Anda.</div>
+            {% endif %}
+            
+            {% if details %}
+                <div class="error-details">
+                    <strong>Detail Error:</strong><br>
+                    {{ details }}
+                </div>
+            {% endif %}
+            
+            <a href="/" class="btn">Kembali ke Halaman Utama</a>
+            
+            {% if config.DEBUG and error %}
+                <div class="error-details" style="margin-top: 30px;">
+                    <strong>Debug Info:</strong><br>
+                    {{ error }}
+                </div>
+            {% endif %}
+        </div>
+    </div>
+</body>
+</html>

@@ -1,0 +1,50 @@
+version: '3.8'
+
+services:
+  # Development application
+  app:
+    build: .
+    container_name: filmku-api-dev
+    ports:
+      - "5002:5000"
+    environment:
+      - FLASK_ENV=development
+      - FLASK_DEBUG=True
+      - DATABASE_URL=sqlite:///movies.db
+      - REDIS_URL=redis://redis:6379/0
+      - SECRET_KEY=dev-secret-key-for-development-only
+      - TMDB_API_KEY=${TMDB_API_KEY}
+      - ALLOWED_ORIGINS=http://localhost:3000,http://localhost:5000,http://127.0.0.1:5000
+      - RATELIMIT_DEFAULT=10000 per day, 1000 per hour
+      - CACHE_TYPE=simple
+      - LOG_LEVEL=DEBUG
+    volumes:
+      - .:/app
+      - ./logs:/app/logs
+      - ./Data:/app/Data
+    depends_on:
+      - redis
+    restart: unless-stopped
+    networks:
+      - filmku-dev-network
+    command: python run.py
+
+  # Redis Cache (Development)
+  redis:
+    image: redis:7-alpine
+    container_name: filmku-redis-dev
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_dev_data:/data
+    restart: unless-stopped
+    networks:
+      - filmku-dev-network
+
+volumes:
+  redis_dev_data:
+    driver: local
+
+networks:
+  filmku-dev-network:
+    driver: bridge

@@ -1,0 +1,433 @@
+<!DOCTYPE html>
+<html lang="id" class="scroll-smooth">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Temukan rekomendasi film Indonesia terbaik dan terbaru">
+    <title>FilmKu - Rekomendasi Film Indonesia</title>
+    
+    <!-- Favicon -->
+    <link rel="icon" href="{{ url_for('static', filename='favicon.ico') }}">
+    
+    <!-- Stylesheets -->
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/main.css') }}?v=3.0.1">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
+    
+    <!-- API Configuration -->
+    <meta name="api-key" content="{{ api_key if api_key else 'ed6196ce9e32a462ca8ad5a7d43ae0e2' }}">
+    <meta name="default-poster" content="{{ url_for('static', filename='images/no-poster.svg') }}">
+</head>
+<body>
+    <!-- Loading Indicator -->
+    <div id="loading-indicator">
+        <div class="spinner"></div>
+        <p>Memuat Film...</p>
+    </div>
+
+    <!-- Error Container -->
+    <div id="error-container" class="error-message"></div>
+
+    <!-- Header -->
+    <header class="header">
+        <nav class="navbar">
+            <div class="container">
+                <a href="/" class="logo">FilmKu</a>
+                <div class="search-container">
+                    <input type="text" id="search-input" placeholder="Cari film..." aria-label="Cari film">
+                    <button id="search-button" aria-label="Cari"><i class="fas fa-search"></i></button>
+                </div>
+                <button class="mobile-menu-button" aria-label="Menu">
+                    <i class="fas fa-bars"></i>
+                </button>
+            </div>
+        </nav>
+    </header>
+
+    <main class="main-content">
+        <!-- Hero Section -->
+        <section class="hero">
+            <div class="hero-content">
+                <h1>Temukan Film Terbaik</h1>
+                <p>Jelajahi koleksi film terbaru dan terpopuler dari seluruh dunia</p>
+            </div>
+        </section>
+
+        <!-- Filter Section -->
+        <section class="filters">
+            <div class="filter-group">
+                <label for="genre-filter">Genre</label>
+                <select id="genre-filter" class="filter-select">
+                    <option value="">Semua Genre</option>
+                    <option value="Action">Action</option>
+                    <option value="Drama">Drama</option>
+                    <option value="Komedi">Komedi</option>
+                    <option value="Horor">Horor</option>
+                    <option value="Romantis">Romantis</option>
+                </select>
+            </div>
+            
+            <div class="filter-group">
+                <label for="year-filter">Tahun</label>
+                <select id="year-filter" class="filter-select">
+                    <option value="">Semua Tahun</option>
+                    {% for year in range(2024, 1999, -1) %}
+                    <option value="{{ year }}">{{ year }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            
+            <div class="filter-group">
+                <label for="sort-by">Urutkan</label>
+                <select id="sort-by" class="filter-select">
+                    <option value="popular">Populer</option>
+                    <option value="trending">Trending</option>
+                    <option value="newest">Terbaru</option>
+                </select>
+            </div>
+        </section>
+
+        <!-- Tab Navigation -->
+        <div class="tabs-container">
+            <div class="tabs">
+                <button class="tab-link active" data-tab="popular">
+                    <i class="fas fa-fire"></i> Populer
+                </button>
+                <button class="tab-link" data-tab="trending">
+                    <i class="fas fa-chart-line"></i> Trending
+                </button>
+                <button class="tab-link" data-tab="newest">
+                    <i class="fas fa-calendar-alt"></i> Terbaru
+                </button>
+            </div>
+        </div>
+
+        <!-- Tab Content -->
+        <div class="tab-content">
+            <!-- Popular Movies -->
+            <section class="movies-section active" id="popular">
+                <div class="section-header">
+                    <h2 class="section-title">Film Populer</h2>
+                    <div class="view-all" data-section="popular">Lihat Semua <i class="fas fa-chevron-right"></i></div>
+                </div>
+                <div class="movies-grid" id="popular-movies"></div>
+            </section>
+
+            <!-- Trending Movies -->
+            <section class="movies-section" id="trending">
+                <div class="section-header">
+                    <h2 class="section-title">Film Trending</h2>
+                    <div class="view-all" data-section="trending">Lihat Semua <i class="fas fa-chevron-right"></i></div>
+                </div>
+                <div class="movies-grid" id="trending-movies"></div>
+            </section>
+
+            <!-- Newest Movies -->
+            <section class="movies-section" id="newest">
+                <div class="section-header">
+                    <h2 class="section-title">Film Terbaru</h2>
+                    <div class="view-all" data-section="newest">Lihat Semua <i class="fas fa-chevron-right"></i></div>
+                </div>
+                <div class="movies-grid" id="newest-movies"></div>
+            </section>
+        </div>
+
+        <!-- Search Results -->
+        <section id="search-results-section" class="movies-grid-container" style="display: none;">
+            <div class="section-header">
+                <h2 class="section-title">Hasil Pencarian</h2>
+                <div id="search-results-count" class="view-all"></div>
+            </div>
+            <div class="movies-grid" id="search-results"></div>
+        </section>
+    </main>
+
+    <!-- Movie Modal -->
+    <div id="movie-modal" class="modal">
+        <div class="modal-content">
+            <span class="close-modal">&times;</span>
+            <div id="movie-details"></div>
+        </div>
+    </div>
+
+    <!-- Footer -->
+    <footer class="footer">
+        <div class="container">
+            <p>&copy; 2024 FilmKu. All rights reserved.</p>
+        </div>
+    </footer>
+
+</body>
+</html>
+            display: none;
+            justify-content: center;
+            align-items: center;
+            padding: 40px 20px;
+            background: rgba(0, 0, 0, 0.7);
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            z-index: 5;
+        }
+        
+        #movie-modal #loading-indicator .spinner {
+            border: 4px solid rgba(255, 255, 255, 0.3);
+            border-top: 4px solid #4a80f0;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin-right: 15px;
+        }
+        
+        #movie-modal #loading-indicator p {
+            color: #fff;
+            font-size: 16px;
+            margin: 0;
+        }
+        
+        /* Responsive adjustments */
+        @media (max-width: 768px) {
+            .modal-content {
+                padding: 1.5rem;
+            }
+            
+            .movie-details {
+                flex-direction: column;
+            }
+            
+            .movie-poster-container {
+                margin: 0 auto 1.5rem;
+            }
+            
+            .movie-info h2 {
+                font-size: 1.5rem;
+            }
+        }
+    </style>
+    
+   <!-- Modal untuk Detail Film -->
+<div id="movie-modal" class="movie-modal">
+    <div class="modal-overlay"></div>
+    <div class="modal-container">
+        <button class="modal-close" aria-label="Tutup">
+            <i class="fas fa-times"></i>
+        </button>
+        
+        <!-- Loading Indicator -->
+        <div id="modal-loading" class="modal-loading">
+            <div class="spinner"></div>
+            <p>Memuat detail film...</p>
+        </div>
+        
+        <!-- Konten Detail Film -->
+        <div id="modal-content" class="modal-body">
+            <!-- Konten akan dimuat secara dinamis -->
+        </div>
+    </div>
+</div>
+                    <!-- Info Film -->
+                    <div class="movie-info">
+                        <!-- Judul dan Tahun -->
+                        <h2 id="modal-title">
+                            <span id="title-text">Judul Film</span>
+                            <span id="modal-year" class="year"></span>
+                        </h2>
+                        
+                        <!-- Rating -->
+                        <div class="movie-meta">
+                            <div class="rating">
+                                <i class="fas fa-star"></i>
+                                <span id="rating-value">-</span>/10
+                                <span class="vote-count">
+                                    (<span id="vote-count">0</span> votes)
+                                </span>
+                            </div>
+                        </div>
+
+                        <!-- Detail Film -->
+                        <div class="movie-detail-box">
+                            <h4 class="detail-title">
+                                <i class="fas fa-info-circle"></i>
+                                Detail Film
+                            </h4>
+                            
+                            <!-- Baris Informasi -->
+                            <div class="detail-grid">
+                                <div class="detail-item">
+                                    <div class="detail-label">
+                                        <i class="far fa-calendar-alt"></i>
+                                        Tahun
+                                    </div>
+                                    <div id="modal-year" class="detail-value">-</div>
+                                </div>
+                                <div class="detail-item">
+                                    <div class="detail-label">
+                                        <i class="fas fa-film"></i>
+                                        Genre
+                                    </div>
+                                    <div id="modal-genres" class="detail-value">-</div>
+                                </div>
+                                <div class="detail-item">
+                                    <div class="detail-label">
+                                        <i class="fas fa-user-tie"></i>
+                                        Sutradara
+                                    </div>
+                                    <div id="modal-director" class="detail-value">-</div>
+                                </div>
+                            </div>
+                            
+                            <!-- Sinopsis -->
+                            <div class="overview-section">
+                                <div class="overview-title">
+                                    <i class="fas fa-scroll"></i>
+                                    Sinopsis
+                                </div>
+                                <p id="modal-overview" class="overview-text">
+                                    Sedang memuat...
+                                </p>
+                            </div>
+                            
+                            <!-- Tombol Aksi -->
+                            <div class="movie-actions">
+                                <button id="watch-trailer" class="btn btn-primary action-btn">
+                                    <i class="fas fa-play"></i> Tonton Trailer
+                                </button>
+                                <button id="close-modal" class="btn btn-secondary action-btn">
+                                    <i class="fas fa-times"></i> Tutup
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+    </div>
+
+    <footer class="footer">
+        <div class="container">
+            <div class="footer-content">
+                <div class="social-links">
+                    <a href="#" aria-label="Facebook"><i class="fab fa-facebook-f"></i></a>
+                    <a href="#" aria-label="Twitter"><i class="fab fa-twitter"></i></a>
+                    <a href="#" aria-label="YouTube"><i class="fab fa-youtube"></i></a>
+                </div>
+                <div class="footer-links">
+                    <h3>Tautan Cepat</h3>
+                    <ul>
+                        <li><a href="#">Beranda</a></li>
+                        <li><a href="#trending">Trending</a></li>
+                        <li><a href="#latest">Terbaru</a></li>
+                        <li><a href="#">Genre</a></li>
+                        <li><a href="#">Tentang Kami</a></li>
+                    </ul>
+                </div>
+                <div class="footer-contact">
+                    <h3>Hubungi Kami</h3>
+                    <p><i class="fas fa-envelope"></i> info@filmku.com</p>
+                    <p><i class="fas fa-phone"></i> +62 123 4567 890</p>
+                    <p><i class="fas fa-map-marker-alt"></i> Jakarta, Indonesia</p>
+                </div>
+            </div>
+            <div class="copyright">
+                <p>&copy; <span id="current-year">2024</span> FilmKu. Semua Hak Dilindungi.</p>
+            </div>
+        </div>
+    </footer>
+
+    <!-- Back to Top Button -->
+    <button id="back-to-top" aria-label="Kembali ke atas">
+        <i class="fas fa-arrow-up"></i>
+    </button>
+
+    <!-- JavaScript -->
+    <script>
+        // Inisialisasi konfigurasi
+        window.APP_CONFIG = {
+            API_BASE_URL: 'https://api.themoviedb.org/3',
+            IMAGE_BASE_URL: 'https://image.tmdb.org/t/p',
+            API_KEY: document.querySelector('meta[name="api-key"]').getAttribute('content'),
+            DEFAULT_POSTER: document.querySelector('meta[name="default-poster"]').getAttribute('content'),
+            POSTER_SIZES: {
+                small: 'w185',
+                medium: 'w342',
+                large: 'w500',
+                original: 'original'
+            }
+        };
+
+        // Set tahun saat ini di footer
+        document.getElementById('current-year').textContent = new Date().getFullYear();
+
+        // Fungsi untuk menampilkan error
+        function showError(message) {
+            const errorContainer = document.getElementById('error-container');
+            if (errorContainer) {
+                errorContainer.textContent = message;
+                errorContainer.style.display = 'block';
+                setTimeout(() => {
+                    errorContainer.style.opacity = '0';
+                    setTimeout(() => {
+                        errorContainer.style.display = 'none';
+                        errorContainer.style.opacity = '1';
+                    }, 500);
+                }, 5000);
+            }
+            console.error(message);
+        }
+
+        // Handler untuk gambar error
+        document.addEventListener('DOMContentLoaded', function() {
+            // Handle gambar error
+            document.body.addEventListener('error', function(e) {
+                if (e.target.tagName === 'IMG') {
+                    e.target.src = window.APP_CONFIG.DEFAULT_POSTER;
+                    e.target.alt = 'Poster tidak tersedia';
+                }
+            }, true);
+
+            // Cek jika ada error saat memuat
+            if (!window.APP_CONFIG.API_KEY) {
+                showError('Peringatan: Kunci API tidak ditemukan. Beberapa fitur mungkin tidak berfungsi.');
+            }
+
+            // Sembunyikan loading indicator setelah semua konten dimuat
+            window.addEventListener('load', function() {
+                const loadingIndicator = document.getElementById('loading-indicator');
+                if (loadingIndicator) {
+                    setTimeout(() => {
+                        loadingIndicator.style.opacity = '0';
+                        setTimeout(() => {
+                            loadingIndicator.style.display = 'none';
+                        }, 500);
+                    }, 500);
+                }
+            });
+        });
+    </script>
+    
+        <!-- Kode yang sudah ada sebelumnya... -->
+
+    <!-- Hasil Pencarian -->
+    <section id="search-results-section" class="movies-section" style="display: none;">
+        <div class="section-header">
+            <h2 class="section-title">Hasil Pencarian</h2>
+            <div id="search-results-count" class="results-count">0 hasil ditemukan</div>
+        </div>
+        <div id="search-results" class="movies-grid"></div>
+    </section>
+
+    <!-- Loading Indicator -->
+    <div id="loading-indicator">
+        <div class="spinner"></div>
+        <p>Memuat Film...</p>
+    </div>
+
+    <!-- Error Container -->
+    <div id="error-container" class="error-message"></div>
+
+    <!-- Main JavaScript -->
+        <!-- Scripts -->
+    <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+</body>
+</html>
