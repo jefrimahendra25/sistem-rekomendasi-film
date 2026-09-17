@@ -1,6 +1,16 @@
-# FilmKu - Rekomendasi Film Indonesia
+---
+title: Filmku Rekomendasi
+emoji: 🎬
+colorFrom: blue
+colorTo: purple
+sdk: docker
+app_port: 7860
+pinned: false
+---
 
-Platform rekomendasi film Indonesia terbaik dengan koleksi film terbaru dan terpopuler dari seluruh dunia.
+# Filmku Rekomendasi
+
+Website rekomendasi film berbasis Flask untuk membantu pengguna menemukan film sesuai preferensi.
 
 ## 🚀 Fitur Utama
 
