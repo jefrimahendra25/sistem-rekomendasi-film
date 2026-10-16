@@ -2,6 +2,7 @@
 Modul layanan film untuk menangani logika bisnis terkait film
 """
 import os
+import re
 import pandas as pd
 import logging
 from datetime import datetime
@@ -492,29 +493,32 @@ class MovieService:
 
     def _sort_trending(self, movies):
         """Sort berdasarkan trending score - fokus pada popularitas dan recency"""
-        current_date = datetime.now()
-        
+        recency_dates = []
+        for movie in movies:
+            try:
+                recency_dates.append(datetime.strptime(movie.get('release_date', ''), '%Y-%m-%d'))
+            except (ValueError, TypeError):
+                continue
+
+        oldest_release = min(recency_dates) if recency_dates else None
+        newest_release = max(recency_dates) if recency_dates else None
+        date_range = (newest_release - oldest_release).days if oldest_release and newest_release else 0
+        recency_weight = 1
+
         def get_trending_score(movie):
-            # Base score dari rating dan jumlah vote
-            vote_avg = movie.get('vote_average', 0)
-            vote_count = movie.get('vote_count', 0)
-            
-            # Beri bobot lebih untuk film dengan lebih banyak vote
-            score = (vote_avg * vote_count) / 1000
-            
-            # Tambahkan bobot untuk film baru (dirilis dalam 30 hari terakhir)
-            release_date = movie.get('release_date', '')
-            if release_date:
+            vote_avg = float(movie.get('vote_average') or 0)
+            vote_count = float(movie.get('vote_count') or 0)
+            engagement_score = (vote_avg * vote_count) / 1000
+
+            recency_score = 0
+            if date_range:
                 try:
-                    release_date = datetime.strptime(release_date, '%Y-%m-%d')
-                    days_since_release = (current_date - release_date).days
-                    if days_since_release <= 30:
-                        # Tambahkan bonus untuk film baru
-                        score += (30 - days_since_release) * 0.1
+                    release_date = datetime.strptime(movie.get('release_date', ''), '%Y-%m-%d')
+                    recency_score = (release_date - oldest_release).days / date_range
                 except (ValueError, TypeError):
                     pass
-            
-            return score
+
+            return engagement_score + (recency_weight * recency_score)
             
         return sorted(movies, key=get_trending_score, reverse=True)
 
@@ -638,13 +642,23 @@ class MovieService:
         overview = str(movie.get('overview', '')).lower()
 
         # Dapatkan genre dalam format yang konsisten
+        raw_genres = movie.get('genres', [])
+        if isinstance(raw_genres, dict):
+            raw_genres = [raw_genres]
+        elif isinstance(raw_genres, str):
+            raw_genres = [genre.strip() for genre in raw_genres.split(',') if genre.strip()]
+
         genres_list = []
-        for genre in movie.get('genres', []):
+        for genre in raw_genres:
             if isinstance(genre, dict):
                 genres_list.append(genre.get('name', '').lower())
             else:
                 genres_list.append(str(genre).lower())
         genres = ' '.join(genres_list)
+        keywords = movie.get('keywords', '')
+        if isinstance(keywords, list):
+            keywords = ' '.join(str(keyword) for keyword in keywords)
+        keywords = str(keywords).lower()
 
         # Gabungkan semua term pencarian dengan bobot berbeda
         search_terms = {
@@ -653,9 +667,88 @@ class MovieService:
             'overview': overview,
             'genres': genres,
             # judul diulang 3x
-            'all_terms': f"{title} {title} {title} {overview} {genres}"
+            'all_terms': f"{title} {title} {title} {overview} {genres} {genres} {keywords}"
         }
         return search_terms
+
+    def _recommend_content_similar(self, reference_indices, movies, top_n):
+        """Rank films by TF-IDF cosine similarity to one or more reference films."""
+        from sklearn.feature_extraction.text import TfidfVectorizer
+        from sklearn.metrics.pairwise import linear_kernel
+        import numpy as np
+
+        if not reference_indices or not movies:
+            return []
+
+        documents = [self._get_movie_search_terms(movie)['all_terms'] for movie in movies]
+        stop_words = [
+            'yang', 'di', 'ke', 'dari', 'dan', 'atau', 'dengan', 'untuk', 'pada',
+            'the', 'and', 'of', 'to', 'in', 'a', 'is', 'it', 'that', 'was', 'as', 'on'
+        ]
+        vectorizer = TfidfVectorizer(
+            stop_words=stop_words,
+            ngram_range=(1, 2),
+            min_df=1,
+            max_df=0.95,
+            sublinear_tf=True
+        )
+        content_matrix = vectorizer.fit_transform(documents)
+        reference_similarities = linear_kernel(content_matrix[reference_indices], content_matrix)
+        similarity_scores = np.asarray(reference_similarities).max(axis=0)
+        reference_indices = set(reference_indices)
+
+        ranked_indices = sorted(
+            (
+                (float(score), index)
+                for index, score in enumerate(similarity_scores)
+                if index not in reference_indices and score > 0
+            ),
+            key=lambda item: (-item[0], item[1])
+        )
+        return [movies[index].copy() for _, index in ranked_indices[:top_n]]
+
+    def recommend_similar_movies(self, query, movies, top_n=20):
+        """Use matching movie titles as CBF references; return None if no title matches."""
+        if not query or not movies:
+            return None
+
+        normalized_query = re.sub(r'[^a-z0-9]+', ' ', str(query).lower()).strip()
+        if not normalized_query:
+            return None
+
+        normalized_titles = [
+            re.sub(r'[^a-z0-9]+', ' ', str(movie.get('title', '')).lower()).strip()
+            for movie in movies
+        ]
+        query_tokens = set(normalized_query.split())
+        title_tokens = [set(title.split()) for title in normalized_titles]
+        reference_indices = [
+            index for index, title in enumerate(normalized_titles)
+            if title == normalized_query
+        ]
+
+        if not reference_indices and len(query_tokens) == 1:
+            reference_indices = [
+                index for index, tokens in enumerate(title_tokens)
+                if query_tokens and query_tokens.issubset(tokens)
+            ]
+
+        if not reference_indices and len(normalized_query) >= 4:
+            fuzzy_scores = [
+                fuzz.ratio(normalized_query, title) if title else 0
+                for title in normalized_titles
+            ]
+            best_score = max(fuzzy_scores, default=0)
+            if best_score >= 90:
+                reference_indices = [
+                    index for index, score in enumerate(fuzzy_scores)
+                    if score >= best_score - 2
+                ]
+
+        if not reference_indices:
+            return None
+
+        return self._recommend_content_similar(reference_indices, movies, top_n)
 
 
     def _init_tfidf_vectors(self, movies):
@@ -1149,35 +1242,11 @@ class MovieService:
             Daftar film rekomendasi
         """
         try:
-            # Siapkan metadata untuk setiap film
-            movie_metadata = []
-            for movie in movies:
-                # Handle genres yang bisa dalam berbagai format
-                genres_list = []
-                for genre in movie.get('genres', []):
-                    if isinstance(genre, dict):
-                        genres_list.append(genre.get('name', ''))
-                    else:
-                        genres_list.append(str(genre))
-                
-                movie_metadata.append({
-                    'id': movie.get('id'),
-                    'title': movie.get('title', ''),
-                    'genres': ' '.join(genres_list),
-                    'overview': movie.get('overview', '')
-                })
-            
-            # Dapatkan rekomendasi
-            similar_movies = self._get_similar_movies(
-                movie_id, 
-                movies, 
-                movie_metadata, 
-                exclude_ids=[movie_id],
-                top_n=top_n
-            )
-            
-            return similar_movies
-            
+            reference_indices = [
+                index for index, movie in enumerate(movies)
+                if str(movie.get('id')) == str(movie_id)
+            ]
+            return self._recommend_content_similar(reference_indices, movies, top_n)
         except Exception as e:
             logger.error(f"Error in recommend_movies: {str(e)}", exc_info=True)
             return []

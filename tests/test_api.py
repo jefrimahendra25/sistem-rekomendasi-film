@@ -3,6 +3,7 @@ API endpoint tests
 """
 import json
 import pytest
+from unittest.mock import patch
 from app.models import Movie, Genre
 
 class TestAPIEndpoints:
@@ -146,6 +147,40 @@ class TestAPIEndpoints:
         assert 'results' in data
         assert data['query'] == sample_search_query
         assert 'total_results' in data
+
+    def test_search_matching_movie_title_uses_content_based_results(self, client, app):
+        """A movie title search should return other content-similar movies."""
+        from app.routes import movie_service
+
+        movies = [
+            {
+                'id': 101,
+                'title': 'Dilan 1990',
+                'overview': 'A high school romance between Dilan and Milea in Bandung.',
+                'genres': [{'name': 'Drama'}, {'name': 'Romance'}],
+            },
+            {
+                'id': 102,
+                'title': 'Milea: Suara dari Dilan',
+                'overview': 'A romantic high school story about Dilan and Milea.',
+                'genres': [{'name': 'Drama'}, {'name': 'Romance'}],
+            },
+            {
+                'id': 103,
+                'title': 'Space Battle',
+                'overview': 'A crew battles aliens in deep space.',
+                'genres': [{'name': 'Action'}, {'name': 'Science Fiction'}],
+            },
+        ]
+
+        with app.app_context():
+            with patch.object(movie_service, 'load_movies', return_value=movies):
+                response = client.get('/api/search?q=Dilan%201990')
+
+        data = json.loads(response.data)
+        assert response.status_code == 200
+        assert data['search_mode'] == 'content_based'
+        assert [movie['id'] for movie in data['results']] == [102]
     
     def test_search_movies_empty_query(self, client):
         """Test search with empty query"""

@@ -245,8 +245,12 @@ def search_movies():
         movies_data = movie_service.load_movies()
         logger.info(f"Loaded {len(movies_data)} movies for search")
 
-        search_results = movie_service.search_movies(query, movies_data, min_results=20)
-        logger.info(f"Search completed, found {len(search_results)} results")
+        search_results = movie_service.recommend_similar_movies(query, movies_data, top_n=20)
+        search_mode = 'content_based'
+        if search_results is None:
+            search_results = movie_service.search_movies(query, movies_data, min_results=20)
+            search_mode = 'text_search'
+        logger.info(f"Search completed in {search_mode} mode, found {len(search_results)} results")
 
         paginated_results, page, total_pages, total_results = paginate_movies(
             search_results, page, show_all=show_all
@@ -257,6 +261,7 @@ def search_movies():
         result = create_api_response(
             status='success',
             query=query,
+            search_mode=search_mode,
             results=paginated_results,
             page=page,
             total_pages=total_pages,

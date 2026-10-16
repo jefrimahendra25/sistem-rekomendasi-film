@@ -320,6 +320,73 @@ class TestMovieService:
             assert isinstance(sorted_trending, list)
             assert isinstance(sorted_popular, list)
             assert isinstance(sorted_newest, list)
+
+    def test_trending_keeps_engagement_primary_with_recency_bonus(self, app):
+        """Engagement stays primary while recency breaks close-score rankings."""
+        with app.app_context():
+            service = MovieService()
+            movies = [
+                {
+                    'title': 'High-engagement older film',
+                    'vote_average': 8.0,
+                    'vote_count': 3000,
+                    'release_date': '2000-01-01',
+                },
+                {
+                    'title': 'Older close-engagement film',
+                    'vote_average': 7.0,
+                    'vote_count': 100,
+                    'release_date': '2025-10-23',
+                },
+                {
+                    'title': 'Newer close-engagement film',
+                    'vote_average': 6.99,
+                    'vote_count': 100,
+                    'release_date': '2025-11-27',
+                },
+            ]
+
+            sorted_movies = service.sort_movies(movies, 'trending')
+
+            assert sorted_movies[0]['title'] == 'High-engagement older film'
+            assert sorted_movies[1]['title'] == 'Newer close-engagement film'
+
+    def test_content_based_search_recommends_similar_movies(self, app):
+        """A matching title should act as the reference for content-based recommendations."""
+        with app.app_context():
+            service = MovieService()
+            movies = [
+                {
+                    'id': 1,
+                    'title': 'Dilan 1990',
+                    'overview': 'A high school romance between Dilan and Milea in Bandung.',
+                    'genres': [{'name': 'Drama'}, {'name': 'Romance'}],
+                },
+                {
+                    'id': 2,
+                    'title': 'Milea: Suara dari Dilan',
+                    'overview': 'A romantic high school story about Dilan and Milea.',
+                    'genres': [{'name': 'Drama'}, {'name': 'Romance'}],
+                },
+                {
+                    'id': 3,
+                    'title': 'Action in Space',
+                    'overview': 'A crew battles aliens in deep space.',
+                    'genres': [{'name': 'Action'}, {'name': 'Science Fiction'}],
+                },
+                {
+                    'id': 4,
+                    'title': 'Keadilan',
+                    'overview': 'A crime drama about a court case.',
+                    'genres': [{'name': 'Crime'}, {'name': 'Drama'}],
+                },
+            ]
+
+            recommendations = service.recommend_similar_movies('Dilan 1990', movies, top_n=20)
+
+            assert recommendations is not None
+            assert recommendations[0]['id'] == 2
+            assert 1 not in [movie['id'] for movie in recommendations]
     
     def test_search_movies_csv_service(self, app):
         """Test movie search with CSV service"""

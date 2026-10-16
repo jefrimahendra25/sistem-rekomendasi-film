@@ -1233,27 +1233,25 @@ var App = (function() {
                 // Untuk tab trending: urutkan berdasarkan trending_score = (vote_avg * vote_count)/1000 + recency_bonus
                 // (harus konsisten dengan rumus _sort_trending di backend movie_service.py)
                 if (tabId === 'trending') {
+                    const releaseTimestamps = sortedResults
+                        .map(movie => Date.parse(movie.release_date || ''))
+                        .filter(timestamp => Number.isFinite(timestamp));
+                    const oldestRelease = releaseTimestamps.length ? Math.min(...releaseTimestamps) : null;
+                    const newestRelease = releaseTimestamps.length ? Math.max(...releaseTimestamps) : null;
+                    const releaseRange = oldestRelease !== null ? newestRelease - oldestRelease : 0;
+                    const recencyWeight = 1;
+
                     sortedResults.sort((a, b) => {
-                        const scoreA = ((a.vote_average || 0) * (a.vote_count || 0)) / 1000;
-                        const scoreB = ((b.vote_average || 0) * (b.vote_count || 0)) / 1000;
-                        
-                        // Tambahkan recency bonus untuk film rilis dalam 30 hari terakhir
-                        const now = new Date();
-                        const getRecencyBonus = (releaseDate) => {
-                            if (!releaseDate) return 0;
-                            try {
-                                const rd = new Date(releaseDate);
-                                const daysSince = Math.floor((now - rd) / (1000 * 60 * 60 * 24));
-                                if (daysSince >= 0 && daysSince <= 30) {
-                                    return (30 - daysSince) * 0.1;
-                                }
-                            } catch(e) {}
-                            return 0;
+                        const getTrendingScore = movie => {
+                            const engagementScore = ((movie.vote_average || 0) * (movie.vote_count || 0)) / 1000;
+                            const timestamp = Date.parse(movie.release_date || '');
+                            const recencyScore = releaseRange && Number.isFinite(timestamp)
+                                ? (timestamp - oldestRelease) / releaseRange
+                                : 0;
+                            return engagementScore + (recencyWeight * recencyScore);
                         };
-                        
-                        const finalA = scoreA + getRecencyBonus(a.release_date);
-                        const finalB = scoreB + getRecencyBonus(b.release_date);
-                        return finalB - finalA;
+
+                        return getTrendingScore(b) - getTrendingScore(a);
                     });
                 }
                 // Untuk tab newest: urutkan berdasarkan release_date (terbaru dulu)
