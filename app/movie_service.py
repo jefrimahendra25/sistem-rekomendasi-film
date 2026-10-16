@@ -671,7 +671,7 @@ class MovieService:
         }
         return search_terms
 
-    def _recommend_content_similar(self, reference_indices, movies, top_n):
+    def _recommend_content_similar(self, reference_indices, movies, top_n, include_references=False):
         """Rank films by TF-IDF cosine similarity to one or more reference films."""
         from sklearn.feature_extraction.text import TfidfVectorizer
         from sklearn.metrics.pairwise import linear_kernel
@@ -705,10 +705,16 @@ class MovieService:
             ),
             key=lambda item: (-item[0], item[1])
         )
-        return [movies[index].copy() for _, index in ranked_indices[:top_n]]
+        reference_movies = (
+            [movies[index].copy() for index in reference_indices]
+            if include_references else []
+        )
+        remaining_slots = max(0, top_n - len(reference_movies))
+        similar_movies = [movies[index].copy() for _, index in ranked_indices[:remaining_slots]]
+        return (reference_movies + similar_movies)[:top_n]
 
     def recommend_similar_movies(self, query, movies, top_n=20):
-        """Use matching movie titles as CBF references; return None if no title matches."""
+        """Use matching movie titles as CBF references and include them in the results."""
         if not query or not movies:
             return None
 
@@ -748,7 +754,12 @@ class MovieService:
         if not reference_indices:
             return None
 
-        return self._recommend_content_similar(reference_indices, movies, top_n)
+        return self._recommend_content_similar(
+            reference_indices,
+            movies,
+            top_n,
+            include_references=True
+        )
 
 
     def _init_tfidf_vectors(self, movies):

@@ -352,7 +352,7 @@ class TestMovieService:
             assert sorted_movies[1]['title'] == 'Newer close-engagement film'
 
     def test_content_based_search_recommends_similar_movies(self, app):
-        """A matching title should act as the reference for content-based recommendations."""
+        """A matching title should be shown before its content-based recommendations."""
         with app.app_context():
             service = MovieService()
             movies = [
@@ -385,8 +385,8 @@ class TestMovieService:
             recommendations = service.recommend_similar_movies('Dilan 1990', movies, top_n=20)
 
             assert recommendations is not None
-            assert recommendations[0]['id'] == 2
-            assert 1 not in [movie['id'] for movie in recommendations]
+            assert [movie['id'] for movie in recommendations[:2]] == [1, 2]
+            assert 3 not in [movie['id'] for movie in recommendations]
     
     def test_search_movies_csv_service(self, app):
         """Test movie search with CSV service"""

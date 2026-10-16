@@ -180,7 +180,7 @@ class TestAPIEndpoints:
         data = json.loads(response.data)
         assert response.status_code == 200
         assert data['search_mode'] == 'content_based'
-        assert [movie['id'] for movie in data['results']] == [102]
+        assert [movie['id'] for movie in data['results'][:2]] == [101, 102]
     
     def test_search_movies_empty_query(self, client):
         """Test search with empty query"""
