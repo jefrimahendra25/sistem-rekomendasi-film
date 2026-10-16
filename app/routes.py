@@ -235,7 +235,7 @@ def search_movies():
         else:
             cache = current_app.cache if hasattr(current_app, 'cache') else None
 
-        cache_key = f"search_{query}_{page}_{show_all}"
+        cache_key = f"search_cbf_v2_{query}_{page}_{show_all}"
         if cache:
             cached_result = cache.get(cache_key)
             if cached_result:
