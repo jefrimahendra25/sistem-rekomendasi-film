@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
-"""
-Generate Trending Tab Diagram
-Menampilkan diagram hasil pencarian Trending Tab
-Menggunakan TF-IDF + PCC + Trending Score (vote_avg × vote_count / 1000 + new release bonus)
-"""
+"""Generate a diagram of the web's Trending tab."""
 
 import sys
 import os
@@ -44,78 +40,70 @@ def generate_trending_diagram():
         print(f"   Total movies loaded : {len(movies)}")
 
         # =====================================================
-        # FILTER BY QUERY (seperti web filter by genre/year)
+        # Match /api/movies?type=trending: filter, sort, then take page one.
         # =====================================================
 
-        # Di web, tab trending tidak melakukan search, tapi filter
-        # Untuk diagram, kita filter berdasarkan query "dilan 1990"
-        # menggunakan search untuk mendapatkan film yang relevan
-        query = "dilan 1990"
-
-        print(f"\n2. Filtering movies with query : '{query}'")
-
-        # Menggunakan search untuk filter (mirip dengan filter by genre/year di web)
-        filtered_results = movie_service.search_movies(
-            query=query,
-            movies=movies,
-            min_results=5
-        )
-
-        print(f"   Filtered results found : {len(filtered_results)}")
+        filtered_movies = movie_service.filter_movies(movies, '', '')
+        print(f"\n2. Movies after web filters : {len(filtered_movies)}")
 
         # =====================================================
         # VALIDASI
         # =====================================================
 
-        if not filtered_results:
+        if not filtered_movies:
 
             print("\n❌ No movies found")
             return
 
         # =====================================================
-        # SORT BY TRENDING (menggunakan rumus skripsi)
+        # SORT BY TRENDING (same as MovieService and the web tab)
         # =====================================================
 
-        print("\n3. Sorting by trending score (rumus skripsi)...")
+        print("\n3. Sorting by trending score...")
+
+        parsed_release_dates = []
+        for movie in filtered_movies:
+            try:
+                parsed_release_dates.append(
+                    datetime.strptime(movie.get('release_date', ''), '%Y-%m-%d')
+                )
+            except (ValueError, TypeError):
+                continue
+
+        oldest_release = min(parsed_release_dates) if parsed_release_dates else None
+        newest_release = max(parsed_release_dates) if parsed_release_dates else None
+        release_date_range = (
+            (newest_release - oldest_release).days
+            if oldest_release and newest_release else 0
+        )
+        recency_weight = 1
 
         def get_trending_score(movie):
-            """Calculate trending score sesuai rumus skripsi.
-            
-            Rumus 3.2: Engagement Score = (Rating × Vote Count) / 1000
-            Rumus 3.3: Recency Bonus = (30 - Days Since Release) × 0.1 (jika Days ≤ 30)
-            Rumus 3.4: Trending Score = Engagement Score + Recency Bonus
-            """
-            vote_avg = movie.get('vote_average', 0) or 0
-            vote_count = movie.get('vote_count', 0) or 0
-            
-            # Engagement Score (Rumus 3.2)
+            try:
+                vote_avg = float(movie.get('vote_average') or 0)
+                vote_count = float(movie.get('vote_count') or 0)
+            except (TypeError, ValueError):
+                vote_avg = 0.0
+                vote_count = 0.0
+
             engagement_score = (vote_avg * vote_count) / 1000
-            
-            # Recency Bonus (Rumus 3.3)
-            recency_bonus = 0.0
-            release_date = movie.get('release_date', '')
-            if release_date:
+            recency_score = 0.0
+            if release_date_range:
                 try:
-                    rd_dt = datetime.strptime(release_date, '%Y-%m-%d')
-                    days_since_release = (datetime.now() - rd_dt).days
-                    if days_since_release <= 30:
-                        recency_bonus = (30 - days_since_release) * 0.1
+                    release_date = datetime.strptime(movie.get('release_date', ''), '%Y-%m-%d')
+                    recency_score = (release_date - oldest_release).days / release_date_range
                 except (ValueError, TypeError):
                     pass
-            
-            # Trending Score (Rumus 3.4)
-            trending_score = engagement_score + recency_bonus
-            
-            return trending_score
 
-        # Sort by trending score descending
-        trending_results = sorted(filtered_results, key=get_trending_score, reverse=True)
+            return engagement_score + recency_weight * recency_score
+
+        trending_results = movie_service.sort_movies(filtered_movies, 'trending')
 
         # =====================================================
         # HASIL DINAMIS
         # =====================================================
 
-        top_movies = trending_results
+        top_movies = trending_results[:20]
 
         total_movies = len(top_movies)
 
@@ -127,7 +115,6 @@ def generate_trending_diagram():
 
         titles = []
         trending_scores = []
-        vote_averages = []
         vote_counts = []
 
         for movie in top_movies:
@@ -140,11 +127,12 @@ def generate_trending_diagram():
 
             titles.append(title)
 
-            # Gunakan trending score (rumus skripsi)
             trending_scores.append(get_trending_score(movie))
 
-            vote_averages.append(float(movie.get('vote_average', 0)))
-            vote_counts.append(int(movie.get('vote_count', 0)))
+            try:
+                vote_counts.append(int(float(movie.get('vote_count') or 0)))
+            except (TypeError, ValueError):
+                vote_counts.append(0)
 
         # =====================================================
         # DATA SUDAH DI-SORT SEBELUMNYA
@@ -159,7 +147,7 @@ def generate_trending_diagram():
         fig, ax = plt.subplots(
             figsize=(16, fig_height)
         )
-        fig.subplots_adjust(left=0.38, right=0.80, top=0.86, bottom=0.20)
+        fig.subplots_adjust(left=0.38, right=0.95, top=0.86, bottom=0.20)
 
         # =====================================================
         # Y POSITION
@@ -168,26 +156,10 @@ def generate_trending_diagram():
         y_pos = np.arange(len(titles))
 
         # =====================================================
-        # HORIZONTAL BAR CHART WITH LOG SCALE
+        # HORIZONTAL BAR CHART WITH LINEAR SCALE
         # =====================================================
 
-        plot_scores = []
-        for score in trending_scores:
-            # Bulatkan ke 2 desimal untuk konsistensi
-            rounded_score = round(score, 2)
-
-            if rounded_score == 0:
-                plot_scores.append(0.01)  # Bar pendek untuk nilai 0
-            elif rounded_score == 0.01:
-                plot_scores.append(0.012)  # Bar sedikit lebih panjang untuk nilai 0.01
-            elif rounded_score == 0.02:
-                plot_scores.append(0.02)  # Bar untuk nilai 0.02
-            elif rounded_score == 0.03:
-                plot_scores.append(0.03)  # Bar untuk nilai 0.03
-            elif rounded_score == 0.04:
-                plot_scores.append(0.04)  # Bar untuk nilai 0.04
-            else:
-                plot_scores.append(max(score, 0.01))
+        plot_scores = trending_scores
 
         bar_colors = [
             '#08306b' if i == 0 else
@@ -210,26 +182,18 @@ def generate_trending_diagram():
         # VALUE LABEL
         # =====================================================
 
-        max_score = max(plot_scores) if plot_scores else 1
-        x_limit = max_score * 1.25 if max_score > 0 else 1
+        max_score = max(plot_scores) if plot_scores else 0
+        x_limit = max_score * 1.15 if max_score > 0 else 1
 
         for i, (score, bar) in enumerate(zip(trending_scores, bars)):
             width = bar.get_width()
-            
-            if score <= 0.04:
-                # Untuk nilai kecil, tempatkan label lebih dekat dengan bar
-                label_x = width * 1.02
-                ha = 'left'
-                label_color = '#222222'
-            else:
-                label_x = width * 1.06 if width > 0.05 else width + 0.03
-                ha = 'left'
-                label_color = '#222222'
-
-                if label_x >= x_limit:
-                    label_x = width * 0.92
-                    ha = 'right'
-                    label_color = 'white'
+            label_x = width + max_score * 0.015
+            ha = 'left'
+            label_color = '#222222'
+            if label_x >= x_limit:
+                label_x = width - max_score * 0.015
+                ha = 'right'
+                label_color = 'white'
 
             ax.text(
                 label_x,
@@ -259,7 +223,6 @@ def generate_trending_diagram():
         # =====================================================
 
         ax.invert_yaxis()
-        ax.set_xscale('log')
         ax.set_xlim(0.01, x_limit)
 
         # =====================================================
@@ -267,14 +230,14 @@ def generate_trending_diagram():
         # =====================================================
 
         fig.suptitle(
-            f'Hasil Film Trending Berdasarkan Query "{query}"',
+            'Hasil Film Trending pada Tab Web',
             fontsize=22,
             fontweight='bold',
             y=0.98
         )
 
         ax.set_title(
-            'Top 20 film teratas berdasarkan trending score (log scale)',
+            '20 film teratas berdasarkan Trending Score',
             fontsize=12,
             color='#444444',
             pad=24,
@@ -286,7 +249,7 @@ def generate_trending_diagram():
         # =====================================================
 
         ax.set_xlabel(
-            'Trending Score [skala log]',
+            'Trending Score',
             fontsize=13,
             fontweight='bold'
         )
@@ -320,7 +283,7 @@ def generate_trending_diagram():
         ax.tick_params(axis='x', labelsize=11)
         ax.tick_params(axis='y', labelsize=10)
         ax.set_axisbelow(True)
-        ax.xaxis.set_major_locator(mticker.LogLocator(base=10.0, subs=(1.0, 2.0, 5.0), numticks=10))
+        ax.xaxis.set_major_locator(mticker.MaxNLocator(6))
         ax.xaxis.set_major_formatter(mticker.FormatStrFormatter('%.2f'))
 
         # =====================================================
@@ -329,9 +292,9 @@ def generate_trending_diagram():
 
         info_text = (
             f"Total Film : {len(titles)}\n"
-            "Source : TMDb Dataset\n"
-            "Search : TF-IDF + PCC\n"
-            "Sorting : Trending Score (Rumus Skripsi)"
+            "Sumber : Katalog film web\n"
+            "Filter : Semua genre dan tahun\n"
+            "Skor : Engagement + recency ternormalisasi"
         )
 
         fig.text(
@@ -357,9 +320,10 @@ def generate_trending_diagram():
         # OUTPUT FILE
         # =====================================================
 
-        png_file = f'trending_tab_{query.replace(" ", "_")}.png'
-
-        pdf_file = f'trending_tab_{query.replace(" ", "_")}.pdf'
+        output_dir = os.path.join(os.path.dirname(__file__), 'hasil_diagram')
+        os.makedirs(output_dir, exist_ok=True)
+        png_file = os.path.join(output_dir, 'trending_tab_all_movies.png')
+        pdf_file = os.path.join(output_dir, 'trending_tab_all_movies.pdf')
 
         # =====================================================
         # SAVE PNG

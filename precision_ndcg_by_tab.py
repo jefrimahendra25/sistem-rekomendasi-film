@@ -1,10 +1,9 @@
 from app.movie_service import movie_service
-from app.utils import paginate_movies
 
+import argparse
 import math
-from random import Random
-from typing import List, Dict
-from datetime import datetime
+import re
+from typing import List, Dict, Optional
 
 
 def get_genres(movie: Dict) -> set:
@@ -28,71 +27,72 @@ def similarity(text1, text2):
     """Menghitung kemiripan teks (identik dengan precision_search.py)."""
     from difflib import SequenceMatcher
 
+    text1 = str(text1 or '').lower().strip()
+    text2 = str(text2 or '').lower().strip()
+    if not text1 or not text2:
+        return 0.0
+
     return SequenceMatcher(
         None,
-        str(text1).lower(),
-        str(text2).lower(),
+        text1,
+        text2,
     ).ratio()
 
 
 def is_relevant(query_movie: Dict, movie: Dict) -> bool:
-    """Menentukan relevansi (identik dengan precision_search.py)."""
-    query_genres = get_genres(query_movie)
-    movie_genres = get_genres(movie)
-
-    common_genres = query_genres.intersection(movie_genres)
-    genre_match = len(common_genres) > 0
-
-    title_similarity = similarity(
-        query_movie.get('title', ''),
-        movie.get('title', ''),
-    )
-
-    overview_similarity = similarity(
-        query_movie.get('overview', '')[:500],
-        movie.get('overview', '')[:500],
-    )
-
-    query_words = set(query_movie.get('title', '').lower().split())
-    movie_words = set(movie.get('title', '').lower().split())
-
-    keyword_match = len(query_words.intersection(movie_words)) > 0
-
-    if genre_match:
-        return True
-
-    if title_similarity >= 0.5:
-        return True
-
-    if keyword_match:
-        return True
-
-    if overview_similarity >= 0.3:
-        return True
-
-    return False
+    """Use the same title, synopsis, or combined genre/director evidence as the app."""
+    return movie_service.get_relevance_status(
+        query_movie,
+        movie,
+        semantic_similarity=movie.get('semantic_similarity'),
+        synopsis_similarity=movie.get('synopsis_similarity'),
+    )[0]
 
 
-def precision_at_k(relevance_scores: List[int], k: int) -> float:
-    scores = relevance_scores[:k]
+def relevance_grade(query_movie: Dict, movie: Dict) -> int:
+    """Return binary relevance using FilmKu's title, synopsis, or genre/director rule."""
+    return int(is_relevant(query_movie, movie))
 
-    if len(scores) == 0:
+
+def is_reference_movie(query_movie: Dict, movie: Dict) -> bool:
+    query_id = query_movie.get('id')
+    movie_id = movie.get('id')
+    if query_id is not None and movie_id is not None:
+        return str(query_id) == str(movie_id)
+
+    query_title = normalize_title(query_movie.get('title', ''))
+    movie_title = normalize_title(movie.get('title', ''))
+    return bool(query_title) and query_title == movie_title
+
+
+def precision_at_k(relevance_scores: List[int], k: int) -> Optional[float]:
+    if k <= 0:
         return 0.0
 
-    return sum(scores) / len(scores)
+    if len(relevance_scores) < k:
+        return None
+
+    return sum(int(bool(score)) for score in relevance_scores[:k]) / k
 
 
-def calculate_ndcg(relevance_scores: List[int]) -> float:
+def calculate_ndcg(
+    relevance_scores: List[int],
+    ideal_relevance_scores: Optional[List[int]] = None,
+) -> float:
     dcg = 0.0
 
     for i, rel in enumerate(relevance_scores):
-        dcg += rel / math.log2(i + 2)
+        dcg += int(bool(rel)) / math.log2(i + 2)
 
-    ideal_scores = sorted(relevance_scores, reverse=True)
+    ideal_scores = sorted(
+        ideal_relevance_scores if ideal_relevance_scores is not None else relevance_scores,
+        key=bool,
+        reverse=True,
+    )[:len(relevance_scores)]
 
     idcg = 0.0
     for i, rel in enumerate(ideal_scores):
-        idcg += rel / math.log2(i + 2)
+        idcg += int(bool(rel)) / math.log2(i + 2)
 
     if idcg == 0.0:
         return 0.0
@@ -100,283 +100,261 @@ def calculate_ndcg(relevance_scores: List[int]) -> float:
     return dcg / idcg
 
 
-def ndcg_at_k(relevance_scores: List[int], k: int) -> float:
-    return calculate_ndcg(relevance_scores[:k])
+def ndcg_at_k(relevance_scores: List[int], k: int) -> Optional[float]:
+    if k <= 0:
+        return 0.0
+    if len(relevance_scores) < k:
+        return None
+    return calculate_ndcg(relevance_scores[:k], relevance_scores)
 
 
-def get_trending_score(movie: Dict) -> float:
-    """Menghitung trending score sesuai rumus di skripsi.
-    
-    Rumus 3.2: Engagement Score = (Rating × Vote Count) / 1000
-    Rumus 3.3: Recency Bonus = (30 - Days Since Release) × 0.1 (jika Days ≤ 30)
-    Rumus 3.4: Trending Score = Engagement Score + Recency Bonus
-    """
-    vote_avg = movie.get('vote_average', 0) or 0
-    vote_count = movie.get('vote_count', 0) or 0
-    
-    # Engagement Score (Rumus 3.2)
-    engagement_score = (vote_avg * vote_count) / 1000
-    
-    # Recency Bonus (Rumus 3.3)
-    recency_bonus = 0.0
-    release_date = movie.get('release_date', '')
-    if release_date:
-        try:
-            rd_dt = datetime.strptime(release_date, '%Y-%m-%d')
-            days_since_release = (datetime.now() - rd_dt).days
-            if days_since_release <= 30:
-                recency_bonus = (30 - days_since_release) * 0.1
-        except (ValueError, TypeError):
-            pass
-    
-    # Trending Score (Rumus 3.4)
-    trending_score = engagement_score + recency_bonus
-    
-    return trending_score
-
-
-def get_sort_key_for_tab(movie: Dict, tab_type: str):
-    """Mendapatkan nilai yang seharusnya dipakai untuk sorting di tab tertentu."""
-    if tab_type == 'trending':
-        # Gunakan rumus yang SAMA dengan _sort_trending di movie_service.py
-        return get_trending_score(movie)
-    elif tab_type == 'newest':
-        rd = movie.get('release_date', '')
-        if rd:
-            try:
-                return datetime.strptime(rd, '%Y-%m-%d')
-            except (ValueError, TypeError):
-                pass
-        return datetime(1900, 1, 1)
-    elif tab_type == 'popular':
-        return movie.get('vote_average', 0) or 0
-    return 0
-
-
-def calculate_sorting_consistency(ranking: List[Dict], tab_type: str, k: int) -> float:
-    """
-    Mengukur seberapa konsisten urutan film sesuai kriteria tab.
-
-    Menghitung fraction of concordant adjacent pairs:
-    - Untuk setiap pasangan film berurutan (i, i+1):
-      - Cek apakah nilai sort_key film i >= sort_key film i+1
-      - Jika ya -> concordant (benar), jika tidak -> discordant (salah)
-    - Score = jumlah concordant pairs / total adjacent pairs
-    """
-    topk = ranking[:k]
-    if len(topk) < 2:
-        return 1.0  # Jika hanya 1 film, urutan selalu benar
-
-    # Ambil sort key untuk setiap film
-    keys = []
-    for m in topk:
-        key = get_sort_key_for_tab(m, tab_type)
-        keys.append(key)
-
-    # Hitung jumlah pasangan berurutan yang benar
-    concordant = 0
-    total_pairs = len(keys) - 1
-
-    for i in range(len(keys) - 1):
-        # Nilai sekarang harus >= nilai berikutnya (karena descending)
-        if keys[i] >= keys[i + 1]:
-            concordant += 1
-
-    if total_pairs == 0:
-        return 1.0
-
-    score = concordant / total_pairs
-
-    # Log detail pelanggaran untuk K=20
-    if k >= 20:
-        print(f"\n  --- Detail Sorting Consistency ({tab_type}) ---")
-        violations = []
-        for i in range(len(keys) - 1):
-            if not (keys[i] >= keys[i + 1]):
-                violations.append((i + 1, i + 2, keys[i], keys[i + 1]))
-        if violations:
-            print(f"  Ditemukan {len(violations)} pelanggaran urutan:")
-            for pos1, pos2, val1, val2 in violations:
-                if tab_type == 'newest':
-                    y1 = val1.year if hasattr(val1, 'year') else val1
-                    y2 = val2.year if hasattr(val2, 'year') else val2
-                    print(f"    Posisi {pos1} (tahun {y1}) > Posisi {pos2} (tahun {y2}) -- ❌")
-                else:
-                    print(f"    Posisi {pos1} ({val1:.3f}) > Posisi {pos2} ({val2:.3f}) -- ❌")
-        else:
-            print(f"  Semua urutan sesuai kriteria ✅")
-        print(f"  Score: {score:.3f} ({concordant}/{total_pairs} pasangan benar)")
-
-    return score
-
-
-def evaluate_ranking(ranking: List[Dict], query_movie: Dict, k_list: List[int], tab_type: str = ''):
-    max_k = max(k_list)
-    topk = ranking[:max_k]
-
-    relevance_scores = [1 if is_relevant(query_movie, m) else 0 for m in topk]
-
+def calculate_ranking_metrics(
+    ranking: List[Dict],
+    query_movie: Dict,
+    k_list: List[int],
+):
+    """Calculate binary Precision and NDCG using title/synopsis relevance."""
+    recommendations = [
+        movie for movie in ranking
+        if not is_reference_movie(query_movie, movie)
+    ]
+    relevance_scores = [
+        relevance_grade(query_movie, movie)
+        for movie in recommendations
+    ]
     metrics = {}
     for k in k_list:
         metrics[f'P@{k}'] = precision_at_k(relevance_scores, k)
         metrics[f'NDCG@{k}'] = ndcg_at_k(relevance_scores, k)
-        if tab_type:
-            metrics[f'SortCons@{k}'] = calculate_sorting_consistency(ranking, tab_type, k)
-
-    print(f"\n===== HASIL URUTAN PER TAB (top-{max_k}) =====")
-    for rank, movie in enumerate(topk, start=1):
-        relevant = is_relevant(query_movie, movie)
-        status = "Relevan" if relevant else "Tidak Relevan"
-
-        genres = []
-        for g in movie.get('genres', []):
-            if isinstance(g, dict):
-                genres.append(g.get('name', ''))
-            else:
-                genres.append(str(g))
-
-        # Tampilkan sort key untuk debugging
-        sort_key = get_sort_key_for_tab(movie, tab_type)
-        if tab_type == 'trending':
-            print(f"{rank}. {movie.get('title')} | {', '.join(genres)} | {status} | Trending Score: {sort_key:.3f}")
-        elif tab_type == 'newest':
-            year = sort_key.year if hasattr(sort_key, 'year') else 'N/A'
-            print(f"{rank}. {movie.get('title')} | {', '.join(genres)} | {status} | Release Year: {year}")
-        elif tab_type == 'popular':
-            print(f"{rank}. {movie.get('title')} | {', '.join(genres)} | {status} | Vote Avg: {sort_key:.1f}")
-        else:
-            print(f"{rank}. {movie.get('title')} | {', '.join(genres)} | {status}")
-
+        metrics[f'Relevant@{k}'] = sum(relevance_scores[:k])
     return metrics
 
 
-def pick_query_movie_via_search(movies: List[Dict]):
-    """Input judul -> search_movies -> ambil search_results[0]."""
-    print("\n=== PILIH QUERY FILM (mengikuti precision_search.py) ===")
-    user_in = input("Tulis judul film (mis. Dilan 1990): ").strip()
+def calculate_sortcons(ranking: List[Dict]) -> float:
+    """Fraction of all pairs matching the PCC, popularity, and weighted-rating order."""
+    if len(ranking) < 2:
+        return 1.0
 
-    if not user_in:
-        return None
+    def score(movie: Dict, key: str) -> float:
+        value = movie_service._as_float(movie.get(key))
+        return value if math.isfinite(value) else 0.0
 
-    search_results = movie_service.search_movies(user_in, movies)
-    if not search_results:
-        print("Tidak ada hasil search untuk input tersebut.")
-        return None
+    def order_key(movie: Dict):
+        return (
+            round(score(movie, 'pcc_similarity'), 2),
+            score(movie, 'popularity'),
+            movie_service._weighted_rating(movie),
+        )
 
-    query_movie = search_results[0]
-    print(f"Query Movie (dipilih dari top search): {query_movie.get('title')}")
-    return query_movie
-
-
-def get_tab_ranking_from_candidates(
-    base_candidates: List[Dict],
-    tab_type: str,
-    *,
-    genre_id: str = '',
-    year: str = '',
-    page: int = 1,
-    limit: int = 20,
-    show_all: bool = False,
-):
-    """Ambil ranking tab dari kandidat. Sorting disamakan dengan sorting
-    di backend (_sort_trending / _sort_newest / _sort_popular).
-
-    - trending: urut berdasarkan trending_score = (vote_avg * vote_count)/1000 + recency_bonus (descending)
-    - newest:   urut berdasarkan release_date (descending)
-    - popular:  urut berdasarkan vote_average (descending)
-    """
-    filtered = movie_service.filter_movies(base_candidates, genre_id, year)
-
-    if tab_type == 'trending':
-        # Gunakan rumus yang SAMA dengan _sort_trending di movie_service.py
-        sorted_movies = sorted(filtered, key=get_trending_score, reverse=True)
-    elif tab_type == 'newest':
-        def _parse_date(m):
-            rd = m.get('release_date', '')
-            if rd:
-                try:
-                    return datetime.strptime(rd, '%Y-%m-%d')
-                except (ValueError, TypeError):
-                    pass
-            return datetime(1900, 1, 1)
-        sorted_movies = sorted(filtered, key=_parse_date, reverse=True)
-    elif tab_type == 'popular':
-        sorted_movies = sorted(filtered, key=lambda m: m.get('vote_average', 0) or 0, reverse=True)
-    else:
-        sorted_movies = filtered[:]
-
-    paginated_movies, _, _, _ = paginate_movies(
-        sorted_movies,
-        page=page,
-        items_per_page=limit,
-        show_all=show_all,
+    total_pairs = len(ranking) * (len(ranking) - 1) / 2
+    consistent_pairs = sum(
+        order_key(ranking[first_index]) >= order_key(ranking[second_index])
+        for first_index in range(len(ranking) - 1)
+        for second_index in range(first_index + 1, len(ranking))
     )
-    return paginated_movies
+    return consistent_pairs / total_pairs
 
 
-def split_movies(movies: List[Dict], split_ratio: float = 0.8, seed: int = 42):
-    rnd = Random(seed)
-    movies_shuffled = movies[:]
-    rnd.shuffle(movies_shuffled)
-    split_idx = int(len(movies_shuffled) * split_ratio)
-    return movies_shuffled[:split_idx], movies_shuffled[split_idx:]
+def format_ranking_metrics(metrics: Dict, k_list: List[int]) -> str:
+    """Format the shared Precision@K and NDCG@K values for diagram captions."""
+    k_values = '/'.join(str(k) for k in k_list)
+    precision_values = ' / '.join(
+        f"{metrics[f'P@{k}']:.3f}" if metrics[f'P@{k}'] is not None else 'N/A'
+        for k in k_list
+    )
+    ndcg_values = ' / '.join(
+        f"{metrics[f'NDCG@{k}']:.3f}" if metrics[f'NDCG@{k}'] is not None else 'N/A'
+        for k in k_list
+    )
+    return (
+        f"Precision@{k_values}: {precision_values}\n"
+        f"NDCG@{k_values}: {ndcg_values}"
+    )
 
 
-def main():
+def normalize_title(title: str) -> str:
+    return re.sub(r'[^a-z0-9]+', ' ', str(title).lower()).strip()
+
+
+def find_exact_reference_movie(query: str, movies: List[Dict]) -> Optional[Dict]:
+    """Return a reference movie only when the query exactly matches one title."""
+    exact_matches = find_reference_movies(query, movies)
+    return exact_matches[0] if len(exact_matches) == 1 else None
+
+
+def find_reference_movies(query: str, movies: List[Dict]) -> List[Dict]:
+    """Return all movies whose normalized title exactly matches the query."""
+    normalized_query = normalize_title(query)
+    if not normalized_query:
+        return []
+    return [
+        movie for movie in movies
+        if normalize_title(movie.get('title', '')) == normalized_query
+    ]
+
+
+def get_content_ranking(
+    query: str,
+    movies: List[Dict],
+    top_n: int = 20,
+):
+    """Return the same filled and ordered candidate list as the search endpoint."""
+    candidates = movie_service.recommend_similar_movies(
+        query=query,
+        movies=movies,
+        top_n=top_n,
+    )
+    search_mode = "Content-Based Filtering (TF-IDF + metadata)"
+    if candidates is None:
+        candidates = movie_service.search_movies(query, movies)
+        search_mode = "TF-IDF content search fallback"
+    candidates = movie_service.fill_search_results(
+        query,
+        movies,
+        candidates,
+        top_n=top_n,
+    )
+    if not candidates:
+        return [], search_mode
+
+    if any('semantic_similarity' in movie for movie in candidates):
+        search_mode = (
+            "Content-Based Filtering (TF-IDF + semantic synopsis similarity)"
+        )
+
+    pcc_scores = movie_service.calculate_pcc_scores(query, candidates)
+    for movie in candidates:
+        movie_id = movie.get('id')
+        if movie_id is not None:
+            movie['pcc_similarity'] = pcc_scores.get(str(movie_id), 0.0)
+        if not movie.get('relevance'):
+            movie['relevance'] = (
+                'Belum ada kecocokan kuat pada judul, sinopsis, genre, '
+                'atau sutradara'
+            )
+
+    ranked_candidates = movie_service.sort_search_results_by_pcc(candidates)
+    return ranked_candidates[:top_n], search_mode
+
+
+def normalize_queries(query_arguments: List[str], prompted_query: str = '') -> List[str]:
+    """Accept multiple CLI or prompted queries, including pipe-separated values."""
+    raw_queries = query_arguments if query_arguments else [prompted_query]
+    return [
+        query.strip()
+        for value in raw_queries
+        for query in value.split('|')
+        if query.strip()
+    ]
+
+
+def build_argument_parser():
+    parser = argparse.ArgumentParser(
+        description='Search film recommendations and optionally calculate Precision@K and NDCG@K.'
+    )
+    parser.add_argument(
+        'queries',
+        nargs='*',
+        help='one or more free-form search queries; separate queries with "|" or separate arguments',
+    )
+    return parser
+
+
+def evaluate_query(query: str, movies: List[Dict], k_list: List[int]):
+    query_movie = find_exact_reference_movie(query, movies)
+    web_ranking, search_mode = get_content_ranking(
+        query,
+        movies,
+        top_n=20,
+    )
+    if not web_ranking:
+        print(f"\nTidak ada hasil untuk query '{query}'.")
+        return
+
+    web_ranking = web_ranking[:20]
+
+    print(f"\n=== Query pencarian: {query} ===")
+    print(f"Mode pencarian: {search_mode}")
+    print(f"Jumlah hasil: {len(web_ranking)}")
+    print("\n=== HASIL PENCARIAN (urutan seperti web) ===")
+    for rank, movie in enumerate(web_ranking, start=1):
+        genres = [
+            genre.get('name', '') if isinstance(genre, dict) else str(genre)
+            for genre in movie.get('genres', [])
+        ]
+        print(
+            f"{rank}. {movie.get('title')} | "
+            f"{', '.join(genres)} | {movie.get('relevance', '')} | "
+            f"PCC {movie.get('pcc_similarity', 0.0) * 100:.2f}%"
+        )
+
+    if query_movie is None:
+        print(
+            "\nPrecision@K dan NDCG@K tidak dihitung karena query pencarian "
+            "bebas tidak menentukan satu film acuan secara persis."
+        )
+        return
+
+    evaluation_ranking = [
+        movie for movie in web_ranking
+        if query_movie is None or not is_reference_movie(query_movie, movie)
+    ]
+    max_k = max(k_list, default=20)
+    if len(evaluation_ranking) < max_k:
+        expanded_ranking, _ = get_content_ranking(
+            query,
+            movies,
+            top_n=max(20, max_k) + 1,
+        )
+        evaluation_ranking = [
+            movie for movie in expanded_ranking
+            if not is_reference_movie(query_movie, movie)
+        ][:max_k]
+
+    print(f"\nFilm acuan untuk evaluasi: {query_movie.get('title')}")
+    print(
+        "Metrik dihitung dari daftar evaluasi; film acuan dikeluarkan "
+        "dan kandidat tambahan (jika diperlukan) tidak ditampilkan."
+    )
+    print(
+        "Kriteria relevansi evaluasi: kecocokan judul, sinopsis, atau "
+        "gabungan genre dan sutradara."
+    )
+    print("\n=== METRIK PADA URUTAN PENCARIAN PCC ===")
+    metrics = calculate_ranking_metrics(evaluation_ranking, query_movie, k_list)
+    for k in k_list:
+        precision = metrics[f'P@{k}']
+        ndcg = metrics[f'NDCG@{k}']
+        precision_output = f"{precision:.3f}" if precision is not None else 'N/A'
+        ndcg_output = f"{ndcg:.3f}" if ndcg is not None else 'N/A'
+        print(f"  Film relevan@{k} = {metrics[f'Relevant@{k}']}/{k}")
+        print(f"  Precision@{k} = {precision_output}")
+        print(f"  NDCG@{k} = {ndcg_output}")
+        print(f"  SortCons Top-{k} = {calculate_sortcons(evaluation_ranking[:k]):.3f}")
+
+
+def main(argv=None):
+    args = build_argument_parser().parse_args(argv)
     movies = movie_service.load_movies()
     if not movies:
         print("Dataset gagal dimuat.")
         return
 
-    _train_movies, _test_movies = split_movies(movies, split_ratio=0.8, seed=42)
-
-    query_movie = pick_query_movie_via_search(movies)
-    if not query_movie:
+    prompt = ''
+    if not args.queries:
+        prompt = input(
+            "Tulis query pencarian film (pisahkan beberapa query dengan '|', "
+            "mis. warkop dki | film horor): "
+        )
+    queries = normalize_queries(args.queries, prompt)
+    if not queries:
+        print("Query pencarian wajib diisi.")
         return
 
-    print(f"\n=== Query yang dipakai: {query_movie.get('title')} ===")
-
-    genre_id = ''
-    year = ''
-    page = 1
-    limit = 20
-    show_all = False
-
-    tabs = {
-        "trending": "trending",
-        "newest": "newest",
-        "popular": "popular",
-    }
-
     k_list = [5, 10, 20]
-
-    print("\n=== HASIL EVALUASI PER TAB (Precision@K & NDCG@K & SortCons@K) ===")
-
-    base_candidates = movie_service.search_movies(query_movie.get('title', ''), movies, min_results=20)
-    base_candidates = base_candidates[:20]
-
-    for label, tab_type in tabs.items():
-        # Semua tab menggunakan hasil search (film relevan dengan query)
-        # Tab trending mengurutkan berdasarkan trending score, bukan similarity score
-        ranking = get_tab_ranking_from_candidates(
-            base_candidates,
-            tab_type,
-            genre_id=genre_id,
-            year=year,
-            page=page,
-            limit=limit,
-            show_all=show_all,
-        )
-
-        print(f"\n--- Tab: {label} ---")
-        metrics = evaluate_ranking(ranking, query_movie, k_list, tab_type=tab_type)
-
-        for k in k_list:
-            print(f"  P@{k}    = {metrics[f'P@{k}']:.3f}")
-            print(f"  NDCG@{k} = {metrics[f'NDCG@{k}']:.3f}")
-            print(f"  SortCons@{k} = {metrics[f'SortCons@{k}']:.3f}")
+    for query in queries:
+        evaluate_query(query, movies, k_list)
 
 
 if __name__ == "__main__":
     main()
-

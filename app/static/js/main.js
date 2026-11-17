@@ -118,6 +118,25 @@ var App = (function() {
         title.textContent = movie.title || movie.name || 'Judul tidak tersedia';
         title.setAttribute('data-movie-id', movie.id);
 
+        if (movie.relevance) {
+            const relevanceBadge = document.createElement('span');
+            const relevanceClass = movie.relevance.startsWith('Mirip berdasarkan ')
+                || movie.relevance === 'Kecocokan berdasarkan genre'
+                ? 'movie-relevance-match'
+                : 'movie-relevance-unverified';
+            relevanceBadge.className = `movie-relevance-badge ${relevanceClass}`;
+            relevanceBadge.textContent = movie.relevance;
+            infoDiv.appendChild(relevanceBadge);
+        }
+
+        const pccSimilarity = Number(movie.pcc_similarity);
+        if (Number.isFinite(pccSimilarity) && pccSimilarity >= 0 && pccSimilarity <= 1) {
+            const pccBadge = document.createElement('span');
+            pccBadge.className = 'movie-pcc-badge';
+            pccBadge.textContent = `Kemiripan PCC: ${(pccSimilarity * 100).toFixed(2)}%`;
+            infoDiv.appendChild(pccBadge);
+        }
+
         const metaDiv = document.createElement('div');
         metaDiv.className = 'movie-meta';
 
@@ -184,7 +203,7 @@ var App = (function() {
             metaDiv.appendChild(genresContainer);
         }
 
-        infoDiv.appendChild(title);
+        infoDiv.insertBefore(title, infoDiv.firstChild);
         infoDiv.appendChild(metaDiv);
 
         card.appendChild(posterDiv);
@@ -605,6 +624,7 @@ var App = (function() {
         if (searchResultsSection) {
             searchResultsSection.style.display = 'block';
         }
+        setSearchMode(true);
 
         if (searchResults) {
             searchResults.innerHTML = '<div class="loading">Mencari film...</div>';
@@ -826,10 +846,11 @@ var App = (function() {
             }
         }
 
-        // Handle director (sutradara) - jika ada di original_data
+        // The movie details API returns director at the top level.
         let director = 'Tidak tersedia';
-        if (movie.original_data && movie.original_data.director) {
-            director = String(movie.original_data.director).trim() || 'Tidak tersedia';
+        const directorValue = movie.director || movie.original_data?.director;
+        if (directorValue) {
+            director = String(directorValue).trim() || 'Tidak tersedia';
         }
 
         // Handle runtime jika ada
@@ -1171,6 +1192,7 @@ var App = (function() {
         if (searchResultsSection) {
             searchResultsSection.style.display = 'block';
         }
+        setSearchMode(true);
 
         if (searchResults) {
             searchResults.innerHTML = '<div class="loading">Mencari film...</div>';
@@ -1198,6 +1220,30 @@ var App = (function() {
             });
     }
 
+    function setSearchMode(enabled) {
+        const searchResultsSection = document.getElementById('search-results-section');
+        const resetSearchBtn = document.getElementById('reset-search');
+        const sections = [
+            document.querySelector('.tabs-container'),
+            document.querySelector('.filters-container'),
+            document.querySelector('.movie-sections')
+        ];
+
+        sections.forEach(section => {
+            if (section) {
+                section.style.display = enabled ? 'none' : '';
+            }
+        });
+
+        if (searchResultsSection) {
+            searchResultsSection.style.display = enabled ? 'block' : 'none';
+        }
+
+        if (resetSearchBtn) {
+            resetSearchBtn.style.display = enabled ? 'inline-block' : 'none';
+        }
+    }
+
     // Private function to display search results
     function displaySearchResults(data) {
         const results = data.results || [];
@@ -1205,165 +1251,67 @@ var App = (function() {
         const query = data.query || '';
 
         console.log(`Menampilkan ${results.length} hasil pencarian untuk query: "${query}"`);
-
+        setSearchMode(true);
         if (results.length === 0) {
             showSearchError(`Tidak ada hasil untuk "${query}"`);
             return;
         }
 
-        // Simpan hasil pencarian ke global state
         currentMovies = results;
-        activeTab = 'search'; // Set active tab ke search mode
+        const searchResults = document.getElementById('search-results');
+        const searchResultsCount = document.getElementById('search-results-count');
 
-        // Update semua tab dengan hasil pencarian
-        const tabs = ['trending', 'newest', 'popular'];
+        if (searchResultsCount) {
+            searchResultsCount.textContent = `${totalResults} hasil ditemukan`;
+        }
 
-        tabs.forEach(tabId => {
-            const container = document.getElementById(`${tabId}-movies`);
-            const pagination = document.getElementById(`${tabId}-pagination`);
-            const tabButton = document.querySelector(`.tab-button[data-tab="${tabId}"]`);
-
-            if (container) {
-                // Kosongkan container
-                container.innerHTML = '';
-
-                // Urutkan hasil pencarian berdasarkan relevansi untuk setiap tab
-                let sortedResults = [...results];
-
-                // Untuk tab trending: urutkan berdasarkan trending_score = (vote_avg * vote_count)/1000 + recency_bonus
-                // (harus konsisten dengan rumus _sort_trending di backend movie_service.py)
-                if (tabId === 'trending') {
-                    const releaseTimestamps = sortedResults
-                        .map(movie => Date.parse(movie.release_date || ''))
-                        .filter(timestamp => Number.isFinite(timestamp));
-                    const oldestRelease = releaseTimestamps.length ? Math.min(...releaseTimestamps) : null;
-                    const newestRelease = releaseTimestamps.length ? Math.max(...releaseTimestamps) : null;
-                    const releaseRange = oldestRelease !== null ? newestRelease - oldestRelease : 0;
-                    const recencyWeight = 1;
-
-                    sortedResults.sort((a, b) => {
-                        const getTrendingScore = movie => {
-                            const engagementScore = ((movie.vote_average || 0) * (movie.vote_count || 0)) / 1000;
-                            const timestamp = Date.parse(movie.release_date || '');
-                            const recencyScore = releaseRange && Number.isFinite(timestamp)
-                                ? (timestamp - oldestRelease) / releaseRange
-                                : 0;
-                            return engagementScore + (recencyWeight * recencyScore);
-                        };
-
-                        return getTrendingScore(b) - getTrendingScore(a);
-                    });
-                }
-                // Untuk tab newest: urutkan berdasarkan release_date (terbaru dulu)
-                else if (tabId === 'newest') {
-                    sortedResults.sort((a, b) => {
-                        const dateA = new Date(a.release_date || '1900-01-01');
-                        const dateB = new Date(b.release_date || '1900-01-01');
-                        return dateB - dateA;
-                    });
-                }
-                // Untuk tab popular: urutkan berdasarkan vote_average (rating tertinggi)
-                else if (tabId === 'popular') {
-                    sortedResults.sort((a, b) => (b.vote_average || 0) - (a.vote_average || 0));
-                }
-
-                // Tampilkan hasil pencarian
-                const fragment = document.createDocumentFragment();
-                sortedResults.forEach(movie => {
-                    if (movie && movie.id) {
-                        try {
-                            const movieCard = createMovieCard(movie);
-                            if (movieCard) {
-                                fragment.appendChild(movieCard);
-                            }
-                        } catch (error) {
-                            console.error('Gagal membuat kartu film:', error);
+        if (searchResults) {
+            searchResults.innerHTML = '';
+            const fragment = document.createDocumentFragment();
+            results.forEach(movie => {
+                if (movie && movie.id) {
+                    try {
+                        const movieCard = createMovieCard(movie);
+                        if (movieCard) {
+                            fragment.appendChild(movieCard);
                         }
+                    } catch (error) {
+                        console.error('Gagal membuat kartu film:', error);
                     }
-                });
-                container.appendChild(fragment);
-
-                // Kosongkan pagination untuk hasil pencarian
-                if (pagination) {
-                    pagination.innerHTML = '';
                 }
-
-                // JAGA NAMA TAB TETAP SAMA - Jangan ubah judul tab
-                // Hanya tandai bahwa tab ini berisi hasil pencarian
-                container.setAttribute('data-search-results', 'true');
-                container.setAttribute('data-search-query', query);
-            }
-        });
-
-        // Switch ke tab trending sebagai default
-        App.switchTab('trending');
-
-        // Tampilkan tombol reset pencarian
-        const resetSearchBtn = document.getElementById('reset-search');
-        if (resetSearchBtn) {
-            resetSearchBtn.style.display = 'inline-block';
-        }
-
-        // Tambahkan tombol untuk kembali ke semua tab normal
-        const trendingContainer = document.getElementById('trending-movies');
-        if (trendingContainer && !trendingContainer.querySelector('.back-to-normal')) {
-            const backButton = document.createElement('button');
-            backButton.className = 'btn btn-secondary back-to-normal';
-            backButton.innerHTML = '<i class="fas fa-arrow-left"></i> Kembali ke Normal';
-            backButton.style.marginBottom = '20px';
-            backButton.addEventListener('click', function() {
-                // Reset ke mode normal
-                resetToNormalMode();
             });
-
-            // Sisipkan tombol kembali di awal container trending
-            trendingContainer.insertBefore(backButton, trendingContainer.firstChild);
+            searchResults.appendChild(fragment);
         }
 
-        console.log(`Displayed ${results.length} search results in all tabs`);
+        activeTab = 'search';
+
+        console.log(`Displayed ${results.length} search results in API ranking order`);
     }
 
     // Private function to reset to normal mode
     function resetToNormalMode() {
         console.log('Resetting to normal mode...');
 
-        // Reset active tab
+        setSearchMode(false);
         activeTab = 'trending';
 
-        // Tab yang akan direset
-        const tabs = ['trending', 'newest', 'popular'];
-
-        // Hapus atribut pencarian dari semua container
-        tabs.forEach(tabId => {
-            const container = document.getElementById(`${tabId}-movies`);
-            if (container) {
-                container.removeAttribute('data-search-results');
-                container.removeAttribute('data-search-query');
-            }
-        });
-
-        // Sembunyikan tombol reset pencarian
-        const resetSearchBtn = document.getElementById('reset-search');
-        if (resetSearchBtn) {
-            resetSearchBtn.style.display = 'none';
+        const searchResults = document.getElementById('search-results');
+        const searchResultsCount = document.getElementById('search-results-count');
+        if (searchResults) {
+            searchResults.innerHTML = '';
+        }
+        if (searchResultsCount) {
+            searchResultsCount.textContent = '0 hasil ditemukan';
         }
 
-        // Hapus tombol kembali
-        const backButton = document.querySelector('.back-to-normal');
-        if (backButton) {
-            backButton.remove();
-        }
-
-        // Reset current movies
         currentMovies = [];
 
-        // Reload semua tab dengan data normal dan filter yang ada
         const genreSelect = document.getElementById('genre-filter');
         const yearSelect = document.getElementById('year-filter');
         const genreId = genreSelect ? genreSelect.value : '';
         const year = yearSelect ? yearSelect.value : '';
 
-        tabs.forEach(tabId => {
+        ['trending', 'newest', 'popular'].forEach(tabId => {
             loadMovies(tabId, 1, genreId, year);
         });
     }

@@ -203,6 +203,8 @@ def create_app():
     from . import docs
     app.register_blueprint(routes.main)
     app.register_blueprint(docs.docs_bp, url_prefix='/docs')
+    if not routes.movie_service.load_movies():
+        logger.error("Movie data could not be loaded during application initialization")
 
     # Root alias route untuk /countries agar endpoint tersedia di kedua path
     @app.route('/countries', methods=['GET'])
@@ -265,4 +267,3 @@ def create_app():
 
     logger.info("Application initialized successfully")
     return app
-

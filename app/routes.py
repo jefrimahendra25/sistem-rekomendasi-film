@@ -173,7 +173,7 @@ def get_movie_recommendations(movie_id):
 
     logger.info(f"Getting recommendations for movie ID: {movie_id}")
 
-    top_n = request.args.get('top_n', 10, type=int)
+    top_n = request.args.get('top_n', 20, type=int)
     top_n = min(max(top_n, 1), 20)
 
     movies_data = movie_service.load_movies()
@@ -235,7 +235,7 @@ def search_movies():
         else:
             cache = current_app.cache if hasattr(current_app, 'cache') else None
 
-        cache_key = f"search_cbf_v2_{query}_{page}_{show_all}"
+        cache_key = f"search_cbf_v26_{query}_{page}_{show_all}"
         if cache:
             cached_result = cache.get(cache_key)
             if cached_result:
@@ -245,12 +245,34 @@ def search_movies():
         movies_data = movie_service.load_movies()
         logger.info(f"Loaded {len(movies_data)} movies for search")
 
-        search_results = movie_service.recommend_similar_movies(query, movies_data, top_n=20)
+        search_results = movie_service.recommend_similar_movies(
+            query,
+            movies_data,
+            top_n=20,
+        )
         search_mode = 'content_based'
         if search_results is None:
-            search_results = movie_service.search_movies(query, movies_data, min_results=20)
+            search_results = movie_service.search_movies(query, movies_data)
             search_mode = 'text_search'
+        search_results = movie_service.fill_search_results(
+            query,
+            movies_data,
+            search_results,
+            top_n=20,
+        )
         logger.info(f"Search completed in {search_mode} mode, found {len(search_results)} results")
+
+        pcc_scores = movie_service.calculate_pcc_scores(query, search_results)
+        for movie in search_results:
+            movie_id = movie.get('id')
+            if movie_id is not None:
+                movie['pcc_similarity'] = pcc_scores.get(str(movie_id), 0.0)
+            if not movie.get('relevance'):
+                movie['relevance'] = (
+                    'Belum ada kecocokan kuat pada judul, sinopsis, genre, '
+                    'atau sutradara'
+                )
+        search_results = movie_service.sort_search_results_by_pcc(search_results)
 
         paginated_results, page, total_pages, total_results = paginate_movies(
             search_results, page, show_all=show_all
@@ -532,4 +554,3 @@ def debug_movie_stats():
             'message': f'Terjadi kesalahan: {str(e)}',
             'traceback': traceback.format_exc()
         }), 500
-

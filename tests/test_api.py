@@ -5,6 +5,7 @@ import json
 import pytest
 from unittest.mock import patch
 from app.models import Movie, Genre
+from app.movie_service import movie_service
 
 class TestAPIEndpoints:
     """Test API endpoints"""
@@ -51,9 +52,34 @@ class TestAPIEndpoints:
         assert data['status'] == 'success'
         assert 'movies' in data
         
-        # Check if movies are sorted by popularity (descending)
+        # Check if movies are sorted by weighted rating (descending)
         if len(data['movies']) > 1:
-            assert data['movies'][0]['popularity'] >= data['movies'][1]['popularity']
+            weighted_ratings = [
+                (
+                    movie['vote_average'] * movie['vote_count']
+                    + 100 * 5.0
+                ) / (movie['vote_count'] + 100)
+                for movie in data['movies']
+            ]
+            assert weighted_ratings == sorted(weighted_ratings, reverse=True)
+
+    @pytest.mark.parametrize('movie_type', ['popular', 'trending', 'newest'])
+    def test_tab_page_matches_movie_service_ranking(self, client, app, movie_type):
+        response = client.get(f'/api/movies?type={movie_type}')
+        assert response.status_code == 200
+        response_movies = json.loads(response.data)['movies']
+
+        with app.app_context():
+            movies = movie_service.filter_movies(
+                movie_service.load_movies(),
+                '',
+                '',
+            )
+            expected_movies = movie_service.sort_movies(movies, movie_type)[:20]
+
+        assert [movie['id'] for movie in response_movies] == [
+            movie['id'] for movie in expected_movies
+        ]
     
     def test_get_movies_newest(self, client):
         """Test getting newest movies"""
@@ -129,6 +155,24 @@ class TestAPIEndpoints:
         assert 'title' in data['movie']
         assert 'overview' in data['movie']
 
+    def test_get_movie_details_includes_top_level_director(self, client, app):
+        from app.routes import movie_service
+
+        movie = {
+            'id': 42,
+            'title': 'Film dengan Sutradara',
+            'overview': 'Sinopsis film.',
+            'director': 'Nama Sutradara',
+        }
+
+        with app.app_context():
+            with patch.object(movie_service, 'load_movies', return_value=[movie]):
+                response = client.get('/api/movie/42')
+
+        data = json.loads(response.data)
+        assert response.status_code == 200
+        assert data['movie']['director'] == 'Nama Sutradara'
+
     
     def test_get_movie_not_found(self, client):
         """Test getting non-existent movie"""
@@ -181,7 +225,97 @@ class TestAPIEndpoints:
         assert response.status_code == 200
         assert data['search_mode'] == 'content_based'
         assert [movie['id'] for movie in data['results'][:2]] == [101, 102]
-    
+        assert all(
+            0.0 <= movie['pcc_similarity'] <= 1.0
+            for movie in data['results']
+        )
+
+    def test_search_results_return_twenty_and_sort_by_pcc_then_popularity(
+        self,
+        client,
+        app,
+    ):
+        """Fill partial recommendations to twenty and sort by PCC/popularity."""
+        from app.routes import movie_service
+
+        movies = [
+            {'id': index, 'title': f'Film {index}', 'popularity': index}
+            for index in range(25)
+        ]
+        pcc_scores = {str(index): 0.5 for index in range(20)}
+        pcc_scores.update({'0': 0.9, '1': 0.9, '2': 0.95})
+        recommend_kwargs = {}
+
+        def recommend(query, candidate_movies, top_n):
+            recommend_kwargs.update(
+                top_n=top_n,
+            )
+            return candidate_movies[:2]
+
+        with app.app_context():
+            with patch.object(movie_service, 'load_movies', return_value=movies):
+                with patch.object(
+                    movie_service,
+                    'recommend_similar_movies',
+                    side_effect=recommend,
+                ):
+                    with patch.object(
+                        movie_service, 'calculate_pcc_scores', return_value=pcc_scores
+                    ):
+                        response = client.get('/api/search?q=sample')
+
+        data = json.loads(response.data)
+        assert response.status_code == 200
+        assert len(data['results']) == 20
+        assert recommend_kwargs == {'top_n': 20}
+        assert [
+            movie['id'] for movie in data['results'][:3]
+        ] == [2, 1, 0]
+        assert all(
+            movie['relevance']
+            == 'Belum ada kecocokan kuat pada judul, sinopsis, genre, atau sutradara'
+            for movie in data['results']
+        )
+
+    def test_search_results_match_shared_diagram_ranking(self, client, app):
+        from app.routes import movie_service
+        from precision_ndcg_by_tab import get_content_ranking
+
+        movies = [
+            {'id': 1, 'title': 'First Film', 'popularity': 1},
+            {'id': 2, 'title': 'Second Film', 'popularity': 20},
+            {'id': 3, 'title': 'Third Film', 'popularity': 5},
+        ]
+        pcc_scores = {'1': 0.8, '2': 0.8, '3': 0.5}
+
+        with app.app_context():
+            with patch.object(movie_service, 'load_movies', return_value=movies):
+                with patch.object(
+                    movie_service,
+                    'recommend_similar_movies',
+                    return_value=movies,
+                ):
+                    with patch.object(
+                        movie_service,
+                        'calculate_pcc_scores',
+                        return_value=pcc_scores,
+                    ):
+                        expected, _ = get_content_ranking('sample', movies)
+                        response = client.get('/api/search?q=sample')
+
+        actual = json.loads(response.data)['results']
+        expected_pairs = [
+            (movie['id'], movie['relevance'], movie['pcc_similarity'])
+            for movie in expected
+        ]
+        actual_pairs = [
+            (movie['id'], movie['relevance'], movie['pcc_similarity'])
+            for movie in actual
+        ]
+
+        assert response.status_code == 200
+        assert actual_pairs == expected_pairs
+
     def test_search_movies_empty_query(self, client):
         """Test search with empty query"""
         response = client.get('/api/search?q=')
@@ -235,6 +369,16 @@ class TestAPIEndpoints:
         assert 'recommendations' in data
         assert 'movie' in data
         assert data['movie']['id'] == movie_id
+        assert len(data['recommendations']) == 20
+        assert all(recommendation.get('relevance') for recommendation in data['recommendations'])
+        pcc_scores = [
+            (
+                -movie_service._as_float(recommendation['pcc_similarity']),
+                -movie_service._as_float(recommendation.get('popularity')),
+            )
+            for recommendation in data['recommendations']
+        ]
+        assert pcc_scores == sorted(pcc_scores)
 
     
     def test_get_recommendations_not_found(self, client):

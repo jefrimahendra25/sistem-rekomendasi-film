@@ -226,3 +226,9 @@ def get_data_file_path():
     current_dir = os.path.dirname(os.path.abspath(__file__))
     data_dir = os.path.join(os.path.dirname(current_dir), 'Data')
     return os.path.join(data_dir, 'film_indonesia_terfilter.csv')
+
+def get_movie_metadata_overrides_path():
+    """Get the path to metadata enriched from verified external sources."""
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    data_dir = os.path.join(os.path.dirname(current_dir), 'Data')
+    return os.path.join(data_dir, 'movie_metadata_overrides.csv')

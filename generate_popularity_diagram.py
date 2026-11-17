@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
-"""
-Generate Popular Tab Diagram
-Menampilkan diagram hasil pencarian Popular Tab
-Menggunakan TF-IDF + PCC + TMDb Weighted Rating
-"""
+"""Generate a diagram of the web's Popular tab."""
 
 import sys
 import os
@@ -43,50 +39,24 @@ def generate_popularity_diagram():
         print(f"   Total movies loaded : {len(movies)}")
 
         # =====================================================
-        # FILTER BY QUERY (seperti web filter by genre/year)
+        # Match /api/movies?type=popular: filter, sort, then take page one.
         # =====================================================
 
-        # Di web, tab popular melakukan search dengan query
-        # Untuk diagram, kita filter berdasarkan query "dilan 1990"
-        query = "dilan 1990"
+        filtered_movies = movie_service.filter_movies(movies, '', '')
+        print(f"\n2. Movies after web filters : {len(filtered_movies)}")
 
-        print(f"\n2. Filtering movies with query : '{query}'")
-
-        # Menggunakan search untuk filter (mirip dengan filter by genre/year di web)
-        filtered_results = movie_service.search_movies(
-            query=query,
-            movies=movies,
-            min_results=5
-        )
-
-        print(f"   Filtered results found : {len(filtered_results)}")
-
-        # =====================================================
-        # VALIDASI
-        # =====================================================
-
-        if not filtered_results:
-
+        if not filtered_movies:
             print("\n❌ No movies found")
             return
 
         # =====================================================
-        # SORT BY POPULAR (menggunakan vote_average seperti di web)
+        # SORT BY THE WEB'S WEIGHTED RATING
         # =====================================================
 
-        print("\n3. Sorting by vote_average (rating)...")
-
-        # Gunakan vote_average untuk sorting (sama dengan tampilan di web)
-        popular_results = sorted(filtered_results, key=lambda x: x.get('vote_average', 0) or 0, reverse=True)
-
-        # =====================================================
-        # HASIL DINAMIS
-        # =====================================================
-
+        print("\n3. Sorting with the Popular tab ranking...")
+        popular_results = movie_service.sort_movies(filtered_movies, 'popular')
         top_movies = popular_results[:20]
-
         total_movies = len(top_movies)
-
         print(f"   Total popular movies : {total_movies}")
 
         # =====================================================
@@ -98,46 +68,25 @@ def generate_popularity_diagram():
         vote_counts = []
 
         for movie in top_movies:
-
             title = movie.get('title', 'Unknown')
-
-            # Potong judul terlalu panjang
             if len(title) > 35:
                 title = title[:35] + '...'
 
             titles.append(title)
+            scores.append(movie_service._weighted_rating(movie))
+            vote_counts.append(int(movie.get('vote_count', 0) or 0))
 
-            # Gunakan vote_average (rating) untuk scores
-            scores.append(
-                float(movie.get('vote_average', 0) or 0.0)
-            )
-
-            vote_counts.append(
-                int(movie.get('vote_count', 0))
-            )
-
-        # =====================================================
-        # SORT DESCENDING (sudah di-sort sebelumnya, tapi untuk keamanan)
-        # =====================================================
-
-        combined = list(zip(titles, scores, vote_counts))
-
-        combined.sort(
-            key=lambda x: x[1],
-            reverse=True
-        )
-
-        titles, scores, vote_counts = zip(*combined)
+        titles = tuple(titles)
+        scores = tuple(scores)
+        vote_counts = tuple(vote_counts)
 
         # =====================================================
         # FIGURE SIZE
         # =====================================================
 
         fig_height = max(10, len(titles) * 0.35)
+        fig, ax = plt.subplots(figsize=(16, fig_height))
 
-        fig, ax = plt.subplots(
-            figsize=(16, fig_height)
-        )
         fig.subplots_adjust(left=0.38, right=0.95, top=0.86, bottom=0.20)
 
         # =====================================================
@@ -150,7 +99,6 @@ def generate_popularity_diagram():
             '#08306b' if i == 0 else
             '#2171b5' if i == 1 else
             '#4292c6' if i == 2 else
-            '#cccccc' if score == 0 else
             '#9ecae1'
             for i, score in enumerate(scores)
         ]
@@ -165,21 +113,15 @@ def generate_popularity_diagram():
         )
 
         max_score = max(scores) if scores else 10
-        x_limit = max_score * 1.15
+        x_limit = max_score * 1.15 if max_score > 0 else 1
 
         for i, (score, bar) in enumerate(zip(scores, bars)):
             width = bar.get_width()
-            if score > 0:
-                label_x = width + 0.15
-                ha = 'left'
-                label_color = '#222222'
-            else:
-                label_x = 0.1
-                ha = 'left'
-                label_color = '#888888'
-
+            label_x = width + max_score * 0.015
+            ha = 'left'
+            label_color = '#222222'
             if label_x >= x_limit:
-                label_x = width - 0.15
+                label_x = width - max_score * 0.015
                 ha = 'right'
                 label_color = 'white'
 
@@ -210,11 +152,11 @@ def generate_popularity_diagram():
         ax.tick_params(axis='x', labelsize=11)
         ax.tick_params(axis='y', labelsize=10)
         ax.set_axisbelow(True)
-        ax.xaxis.set_major_locator(mticker.MultipleLocator(1.0))
+        ax.xaxis.set_major_locator(mticker.MaxNLocator(6))
         ax.xaxis.set_major_formatter(mticker.FormatStrFormatter('%.1f'))
 
         ax.set_xlabel(
-            'Rating (vote_average)',
+            'Rating berbobot',
             fontsize=13,
             fontweight='bold'
         )
@@ -225,14 +167,14 @@ def generate_popularity_diagram():
         )
 
         fig.suptitle(
-            f'Hasil Film Populer Berdasarkan Query "{query}"',
+            'Hasil Film Populer pada Tab Web',
             fontsize=22,
             fontweight='bold',
             y=0.98
         )
 
         ax.set_title(
-            'Top 20 film teratas berdasarkan rating (vote_average)',
+            '20 film teratas berdasarkan rating berbobot',
             fontsize=12,
             color='#444444',
             pad=24,
@@ -248,9 +190,9 @@ def generate_popularity_diagram():
 
         info_text = (
             f"Total Film : {len(titles)}\n"
-            "Source : TMDb Dataset\n"
-            "Search : TF-IDF + PCC\n"
-            "Sorting : Popular Tab (vote_average)"
+            "Sumber : Katalog film web\n"
+            "Filter : Semua genre dan tahun\n"
+            "Urutan : Rating berbobot"
         )
 
         fig.text(
@@ -275,11 +217,10 @@ def generate_popularity_diagram():
 
         # =====================================================
         # OUTPUT FILE
-        # =====================================================
-
-        png_file = f'popular_tab_{query.replace(" ", "_")}.png'
-
-        pdf_file = f'popular_tab_{query.replace(" ", "_")}.pdf'
+        output_dir = os.path.join(os.path.dirname(__file__), 'hasil_diagram')
+        os.makedirs(output_dir, exist_ok=True)
+        png_file = os.path.join(output_dir, 'popular_tab_all_movies.png')
+        pdf_file = os.path.join(output_dir, 'popular_tab_all_movies.pdf')
 
         # =====================================================
         # SAVE PNG

@@ -14,8 +14,9 @@ Website rekomendasi film berbasis Flask untuk membantu pengguna menemukan film s
 
 ## 🚀 Fitur Utama
 
-- **Rekomendasi Film**: Film trending, terbaru, dan populer dengan algoritma machine learning
+- **Rekomendasi Film**: Rekomendasi film serupa diurutkan berdasarkan PCC, dengan tab trending, terbaru, dan populer terpisah
 - **Pencarian Canggih**: Cari film berdasarkan judul dengan algoritma TF-IDF dan fuzzy matching
+- **Kemiripan Sinopsis Semantik**: Menggunakan embedding multilingual untuk menemukan sinopsis serupa meskipun pilihan katanya berbeda
 - **Filter Lanjutan**: Filter berdasarkan genre dan tahun rilis
 - **Detail Film Lengkap**: Informasi lengkap termasuk sinopsis, rating, dan genre
 - **Responsive Design**: Tampilan optimal di desktop dan mobile
@@ -34,6 +35,7 @@ Website rekomendasi film berbasis Flask untuk membantu pengguna menemukan film s
 - **Flask-Caching**: Multi-level caching system
 - **TMDB API**: Sumber data film
 - **Scikit-learn**: Algoritma machine learning untuk rekomendasi
+- **Sentence Transformers**: Embedding multilingual untuk kemiripan makna sinopsis
 - **Pandas**: Pemrosesan data
 - **FuzzyWuzzy**: String matching untuk pencarian
 
@@ -107,6 +109,10 @@ venv\Scripts\activate     # Windows
 pip install -r requirements.txt
 ```
 
+Model embedding multilingual diunduh otomatis saat pencarian rekomendasi pertama kali
+dijalankan dan kemudian disimpan di cache lokal Hugging Face. Jika model tidak dapat
+dimuat, pencarian menggunakan kemiripan TF-IDF sinopsis sebagai fallback.
+
 4. **Setup Environment Variables**
 Buat file `.env` di root directory:
 ```env
@@ -135,6 +141,35 @@ RATELIMIT_DEFAULT=1000 per day, 100 per hour
 CACHE_TYPE=simple
 CACHE_DEFAULT_TIMEOUT=300
 ```
+
+### Melengkapi sinopsis dan sutradara
+
+Metadata yang kosong dapat dilengkapi dari katalog lokal yang cocok berdasarkan ID
+film, lalu dari TMDB. Pengayaan lokal tidak membutuhkan API key:
+
+```powershell
+venv\Scripts\python.exe enrich_movie_metadata.py
+```
+
+Untuk mengambil data yang belum tersedia di katalog lokal, isi `TMDB_API_KEY` di
+file `.env` lokal (jangan commit file tersebut), lalu jalankan:
+
+```powershell
+venv\Scripts\python.exe enrich_movie_metadata.py --fetch-tmdb
+```
+
+Gunakan **API Key (v3)** dari TMDB Account Settings > API, bukan **API Read
+Access Token (v4)**. Jika `TMDB_API_KEY` sudah diatur sebagai environment
+variable Windows, nilai itu mengalahkan nilai di `.env`; perbarui atau hapus
+environment variable lama sebelum menjalankan ulang.
+
+Proses menggunakan ID TMDB yang sudah ada, mengambil sinopsis `id-ID` dan
+menggunakan `en-US` sebagai fallback jika sinopsis Indonesia kosong. Data hasil
+verifikasi disimpan di `Data/movie_metadata_overrides.csv`; detail film akan
+menggunakannya ketika nilai katalog utama kosong. Restart aplikasi setelah
+pengayaan agar cache katalog dimuat ulang. Jika TMDB juga tidak menyediakan
+metadata untuk suatu film, nilainya tetap ditandai belum tersedia dan tidak
+dibuat-buat.
 
 5. **Jalankan Aplikasi**
 ```bash
@@ -172,6 +207,31 @@ docker-compose up -d
 - **Log aggregation** dan rotation
 
 ## 🧪 Testing
+
+### Pencarian dan Evaluasi Precision/NDCG
+
+Jalankan pencarian untuk satu atau beberapa query bebas:
+```bash
+python precision_ndcg_by_tab.py "warkop dki"
+```
+
+Beberapa query dapat digabung dengan pemisah `|`, baik sebagai argumen CLI
+maupun saat diminta input interaktif:
+```bash
+python precision_ndcg_by_tab.py "warkop dki | film horor"
+```
+
+Jika dijalankan tanpa argumen, masukkan query bebas saat diminta. Skrip
+menampilkan hingga 20 hasil dengan jalur pencarian yang sama dengan web.
+Precision@K, NDCG@K, dan SortCons dihitung pada satu daftar hasil pencarian,
+bukan per tab. Hasil pencarian diurutkan berdasarkan PCC tertinggi terlebih
+dahulu; popularitas tertinggi menjadi pemecah seri PCC. Precision menganggap
+kecocokan judul, sinopsis, dan label kecocokan berdasarkan genre sebagai
+relevan; kandidat tanpa kecocokan kuat tidak dihitung relevan. NDCG memakai
+tingkat relevansi bertingkat (judul > sinopsis > genre). SortCons adalah
+proporsi pasangan berurutan yang konsisten dengan urutan pencarian tersebut.
+Metrik hanya dihitung jika query cocok secara unik dengan judul film di
+dataset.
 
 ### Jalankan semua test
 ```bash
@@ -254,7 +314,7 @@ filmku/
 - `GET /api/movies/popular` - Film populer (dengan cache)
 - `GET /api/movies/newest` - Film terbaru (dengan cache)
 - `GET /api/movie/<id>` - Detail film spesifik
-- `GET /api/movie/<id>/recommendations` - Rekomendasi film serupa
+- `GET /api/movie/<id>/recommendations` - Rekomendasi film serupa, diurutkan berdasarkan PCC
 
 ### Pencarian
 - `GET /api/search` - Pencarian film dengan fuzzy matching
@@ -386,10 +446,15 @@ docker-compose up -d --scale app=3
 ### Rekomendasi
 1. Klik film untuk melihat detail
 2. Klik "Rekomendasi Serupa" untuk film mirip
-3. Algoritma hybrid: genre similarity + content-based filtering
+3. Kandidat yang tidak lolos pemeriksaan relevansi tidak ditampilkan
+4. Sistem menampilkan hingga 20 film: kecocokan judul yang memuat seluruh kata
+   judul acuan diprioritaskan (variasi nomor sekuel juga diakui), lalu sinopsis,
+   kemudian gabungan genre dan sutradara
+5. Jika kandidat relevan belum cukup, slot tersisa diisi kandidat terdekat berlabel kecocokan rendah; PCC mengurutkan film dalam tiap tingkat
+6. Popularitas tersedia terpisah pada tab Populer dan Trending, dan tidak mengubah peringkat PCC rekomendasi
 
 ### Navigasi Tab
-- **Trending**: Film sedang populer (popularity + recency scoring)
+- **Trending**: Film dengan engagement dan recency tertinggi
 - **Terbaru**: Film rilis terbaru (chronological)
 - **Populer**: Film dengan rating tertinggi (weighted rating)
 

@@ -5,7 +5,7 @@ from datetime import datetime
 import time
 
 # Konfigurasi TMDB
-TMDB_API_KEY = 'ed6196ce9e32a462ca8ad5a7d43ae0e2'
+TMDB_API_KEY = '07a30544b010aad029322a3e8a24020b'
 
 def fetch_indonesian_movies():
     """Mengambil film Indonesia dari TMDB API untuk tahun 2000-2025"""

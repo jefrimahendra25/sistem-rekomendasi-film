@@ -127,6 +127,36 @@
     transition: color 0.3s ease;
 }
 
+.movie-relevance-badge {
+    align-self: flex-start;
+    margin-bottom: 0.5rem;
+    padding: 0.2rem 0.55rem;
+    border-radius: 999px;
+    font-size: 0.7rem;
+    font-weight: 600;
+}
+
+.movie-relevance-match {
+    background: #eff6ff;
+    color: #1d4ed8;
+}
+
+.movie-relevance-unverified {
+    background: #f3f4f6;
+    color: #4b5563;
+}
+
+.movie-pcc-badge {
+    align-self: flex-start;
+    margin-bottom: 0.5rem;
+    padding: 0.2rem 0.55rem;
+    border-radius: 999px;
+    background: #ecfdf5;
+    color: #047857;
+    font-size: 0.7rem;
+    font-weight: 600;
+}
+
 .movie-card:hover .movie-title {
     color: #2563eb;
 }

@@ -171,7 +171,7 @@ class MovieRecommendations(Resource):
     @swagger_api.doc('get_movie_recommendations')
     @swagger_api.marshal_list_with(recommendation_model)
     @swagger_api.param('movie_id', 'ID film', required=True, type='integer')
-    @swagger_api.param('top_n', 'Jumlah rekomendasi', type='integer', default=10)
+    @swagger_api.param('top_n', 'Jumlah rekomendasi', type='integer', default=20)
     @swagger_api.response(200, 'Success', recommendation_model)
     @swagger_api.response(404, 'Movie Not Found', error_model)
     @swagger_api.response(500, 'Internal Server Error', error_model)

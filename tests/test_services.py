@@ -276,6 +276,34 @@ class TestCacheService:
             service.invalidate_movie_cache()  # All movies
 
 class TestMovieService:
+    def test_metadata_overrides_fill_only_missing_fields_by_movie_id(self, tmp_path):
+        service = MovieService()
+        overrides = tmp_path / 'metadata.csv'
+        overrides.write_text(
+            'id,overview,director,overview_language,source\n'
+            '1,Verified synopsis,Verified director,id-ID,TMDB\n'
+            '3,Unmatched synopsis,Unmatched director,id-ID,TMDB\n',
+            encoding='utf-8',
+        )
+        movies = [
+            {
+                'id': 1,
+                'overview': 'Existing synopsis',
+                'director': 'Tidak tersedia',
+            },
+            {'id': 2, 'overview': '', 'director': ''},
+        ]
+
+        updated = service._apply_movie_metadata_overrides(
+            movies,
+            str(overrides),
+        )
+
+        assert updated[0]['overview'] == 'Existing synopsis'
+        assert updated[0]['director'] == 'Verified director'
+        assert updated[0]['overview_language'] == 'id-ID'
+        assert updated[1]['overview'] == ''
+        assert updated[1]['director'] == ''
     """Test MovieService (original CSV-based service)"""
     
     def test_load_movies(self, app):
@@ -320,6 +348,112 @@ class TestMovieService:
             assert isinstance(sorted_trending, list)
             assert isinstance(sorted_popular, list)
             assert isinstance(sorted_newest, list)
+
+    def test_popular_movies_are_sorted_by_weighted_rating(self, app):
+        with app.app_context():
+            service = MovieService()
+            movies = [
+                {
+                    'title': 'Higher popularity, lower rating',
+                    'popularity': 1000,
+                    'vote_average': 6,
+                    'vote_count': 1000,
+                },
+                {
+                    'title': 'Lower popularity, higher rating',
+                    'popularity': 1,
+                    'vote_average': 9,
+                    'vote_count': 1000,
+                },
+                {
+                    'title': 'Highest rating, few votes',
+                    'popularity': 0,
+                    'vote_average': 10,
+                    'vote_count': 0,
+                },
+            ]
+
+            sorted_movies = service.sort_movies(movies, 'popular')
+
+            assert [movie['title'] for movie in sorted_movies] == [
+                'Lower popularity, higher rating',
+                'Higher popularity, lower rating',
+                'Highest rating, few votes',
+            ]
+
+    def test_pcc_scores_are_normalized_and_rank_matching_text_higher(self, app):
+        with app.app_context():
+            service = MovieService()
+            movies = [
+                {
+                    'id': 1,
+                    'title': 'Dilan 1990',
+                    'overview': 'A high school romance in Bandung.',
+                    'genres': [{'name': 'Drama'}],
+                },
+                {
+                    'id': 2,
+                    'title': 'Milea Suara dari Dilan',
+                    'overview': 'A romance about Dilan and Milea.',
+                    'genres': [{'name': 'Drama'}],
+                },
+                {
+                    'id': 3,
+                    'title': 'Space Battle',
+                    'overview': 'A crew battles aliens in deep space.',
+                    'genres': [{'name': 'Science Fiction'}],
+                },
+            ]
+
+            scores = service.calculate_pcc_scores('Dilan 1990', movies)
+
+            assert all(0.0 <= score <= 1.0 for score in scores.values())
+            assert scores['1'] > scores['3']
+            assert service.calculate_pcc_scores('the', movies) == {
+                '1': 0.0,
+                '2': 0.0,
+                '3': 0.0,
+            }
+
+    def test_pcc_terms_weight_title_three_times_and_include_director(self, app):
+        with app.app_context():
+            service = MovieService()
+            terms = service._get_movie_search_terms({
+                'title': 'Dilan 1990',
+                'overview': 'A high school romance.',
+                'genres': [{'name': 'Drama'}],
+                'director': 'Fajar Bustomi',
+            })
+
+            assert terms['recommendation_terms'].split().count('dilan') == 3
+            assert terms['recommendation_terms'].split().count('fajar') == 1
+            assert terms['all_terms'].split().count('fajar') == 1
+            assert terms['director'] == 'fajar bustomi'
+
+    def test_search_movies_matches_director_metadata(self, app):
+        with app.app_context():
+            service = MovieService()
+            movies = [
+                {
+                    'id': 1,
+                    'title': 'Film Drama Pertama',
+                    'overview': 'Kisah keluarga di sebuah kota.',
+                    'genres': [{'name': 'Drama'}],
+                    'director': 'Fajar Bustomi',
+                },
+                {
+                    'id': 2,
+                    'title': 'Film Aksi Kedua',
+                    'overview': 'Petualangan seorang pahlawan.',
+                    'genres': [{'name': 'Action'}],
+                    'director': 'Sutradara Lain',
+                },
+            ]
+
+            results = service.search_movies('Fajar Bustomi', movies)
+
+            assert [movie['id'] for movie in results] == [1]
+            assert results[0]['relevance'] == 'Mirip berdasarkan sutradara'
 
     def test_trending_keeps_engagement_primary_with_recency_bonus(self, app):
         """Engagement stays primary while recency breaks close-score rankings."""
@@ -385,9 +519,376 @@ class TestMovieService:
             recommendations = service.recommend_similar_movies('Dilan 1990', movies, top_n=20)
 
             assert recommendations is not None
-            assert [movie['id'] for movie in recommendations[:2]] == [1, 2]
-            assert 3 not in [movie['id'] for movie in recommendations]
-    
+            assert [movie['id'] for movie in recommendations] == [1, 2, 4, 3]
+            assert recommendations[0]['relevance'].startswith('Mirip berdasarkan ')
+            assert recommendations[1]['relevance'].startswith('Mirip berdasarkan ')
+            assert all(
+                movie['relevance'].startswith('Kecocokan rendah berdasarkan ')
+                for movie in recommendations[2:]
+            )
+
+    def test_movie_recommendations_are_ranked_by_pcc_not_popularity(self, app):
+        with app.app_context():
+            service = MovieService()
+            movies = [
+                {'id': 1, 'title': 'Reference movie', 'overview': 'Reference story'},
+                {
+                    'id': 2,
+                    'title': 'Popular candidate',
+                    'overview': 'Candidate story A',
+                    'popularity': 1000,
+                    'relevance': 'Mirip berdasarkan sinopsis',
+                },
+                {
+                    'id': 3,
+                    'title': 'Higher PCC candidate',
+                    'overview': 'Candidate story B',
+                    'popularity': 1,
+                    'relevance': 'Mirip berdasarkan sinopsis',
+                },
+                {
+                    'id': 4,
+                    'title': 'Irrelevant fallback',
+                    'overview': 'Unrelated story',
+                    'relevance': '',
+                },
+            ]
+            candidates = [movie.copy() for movie in movies[1:]]
+
+            with patch.object(
+                service,
+                '_recommend_content_similar',
+                return_value=candidates,
+            ) as get_candidates:
+                with patch.object(
+                    service,
+                    'calculate_pcc_scores',
+                    return_value={'2': 0.4, '3': 0.9, '4': 1.0},
+                ) as get_pcc_scores:
+                    recommendations = service.recommend_movies(1, movies, top_n=2)
+
+            assert [movie['id'] for movie in recommendations] == [3, 2]
+            assert [movie['pcc_similarity'] for movie in recommendations] == [0.9, 0.4]
+            get_candidates.assert_called_once_with([0], movies, len(movies))
+            assert 'reference movie' in get_pcc_scores.call_args.args[0]
+            assert [movie['id'] for movie in get_pcc_scores.call_args.args[1]] == [2, 3]
+            assert get_pcc_scores.call_args.kwargs['terms_key'] == 'recommendation_terms'
+
+    def test_movie_recommendations_sort_by_pcc_then_popularity(self, app):
+        with app.app_context():
+            service = MovieService()
+            movies = [
+                {'id': 1, 'title': 'Reference movie'},
+                {
+                    'id': 2,
+                    'title': 'Title match',
+                    'popularity': 1000,
+                    'relevance': 'Mirip berdasarkan judul',
+                },
+                {
+                    'id': 3,
+                    'title': 'Synopsis match',
+                    'popularity': 10,
+                    'relevance': 'Mirip berdasarkan sinopsis',
+                },
+                {
+                    'id': 4,
+                    'title': 'Genre and director match',
+                    'popularity': 50,
+                    'relevance': 'Mirip berdasarkan genre dan sutradara',
+                },
+            ]
+            candidates = [movie.copy() for movie in movies[1:]]
+
+            with patch.object(
+                service,
+                '_recommend_content_similar',
+                return_value=candidates,
+            ):
+                with patch.object(
+                    service,
+                    'calculate_pcc_scores',
+                    return_value={'2': 0.2, '3': 0.8, '4': 0.8},
+                ):
+                    recommendations = service.recommend_movies(1, movies, top_n=3)
+
+            assert [movie['id'] for movie in recommendations] == [4, 3, 2]
+
+    def test_content_recommendations_prioritize_title_and_overview_over_genre(self, app):
+        with app.app_context():
+            service = MovieService()
+            movies = [
+                {
+                    'id': 1,
+                    'title': 'Ocean Signal',
+                    'overview': 'A marine biologist discovers an ancient signal beneath the Pacific ocean.',
+                    'genres': [{'name': 'Adventure'}, {'name': 'Science Fiction'}],
+                },
+                {
+                    'id': 2,
+                    'title': 'Beneath the Pacific',
+                    'overview': 'A marine scientist discovers a mysterious transmission in the deep ocean.',
+                    'genres': [{'name': 'Drama'}],
+                },
+                {
+                    'id': 3,
+                    'title': 'A Quiet Wedding',
+                    'overview': 'A family prepares for a wedding in a small village.',
+                    'genres': [{'name': 'Adventure'}, {'name': 'Science Fiction'}],
+                },
+            ]
+
+            recommendations = service.recommend_similar_movies('Ocean Signal', movies, top_n=20)
+
+            assert recommendations is not None
+            recommended_ids = [movie['id'] for movie in recommendations]
+            assert recommended_ids == [1, 2, 3]
+            assert recommendations[2]['relevance'].startswith(
+                'Kecocokan rendah berdasarkan '
+            )
+
+    def test_content_recommendations_fill_twenty_with_low_confidence_candidates(self, app):
+        with app.app_context():
+            service = MovieService()
+            movies = [
+                {
+                    'id': 1,
+                    'title': 'Ocean Signal',
+                    'overview': 'A marine scientist discovers an ocean signal.',
+                    'genres': [{'name': 'Adventure'}],
+                },
+                {
+                    'id': 2,
+                    'title': 'Ocean Current',
+                    'overview': 'A researcher discovers an underwater message.',
+                    'genres': [{'name': 'Adventure'}],
+                },
+            ]
+            movies.extend(
+                {
+                    'id': movie_id,
+                    'title': f'Unrelated film {movie_id}',
+                    'overview': f'A report about a distant topic {movie_id}.',
+                    'genres': [{'name': 'Documentary'}],
+                }
+                for movie_id in range(3, 26)
+            )
+
+            recommendations = service.recommend_similar_movies(
+                'Ocean Signal', movies, top_n=20
+            )
+
+            assert recommendations is not None
+            assert len(recommendations) == 20
+            assert recommendations[0]['id'] == 1
+            assert recommendations[1]['id'] == 2
+            assert recommendations[2]['relevance'].startswith(
+                'Kecocokan rendah berdasarkan '
+            )
+            assert all(
+                movie['relevance'].startswith('Mirip berdasarkan ')
+                for movie in recommendations[:2]
+            )
+            assert all(
+                movie['relevance'].startswith('Kecocokan rendah berdasarkan ')
+                for movie in recommendations[2:]
+            )
+
+    def test_fill_search_results_pads_title_recommendations_to_twenty(self, app):
+        with app.app_context():
+            service = MovieService()
+            movies = [
+                {
+                    'id': 1,
+                    'title': 'Dilan 1990',
+                    'overview': 'A high school romance in Bandung.',
+                    'genres': [{'name': 'Drama'}, {'name': 'Romance'}],
+                },
+                {
+                    'id': 2,
+                    'title': 'Milea Suara dari Dilan',
+                    'overview': 'A story about Dilan and Milea.',
+                    'genres': [{'name': 'Drama'}, {'name': 'Romance'}],
+                },
+            ]
+            movies.extend(
+                {
+                    'id': movie_id,
+                    'title': f'Film Indonesia {movie_id}',
+                    'overview': f'Kisah keluarga nomor {movie_id}.',
+                    'genres': [{'name': 'Drama'}],
+                }
+                for movie_id in range(3, 26)
+            )
+            recommendations = service.recommend_similar_movies(
+                'Dilan 1990', movies, top_n=20
+            )
+            early_results = recommendations[:2]
+
+            results = service.fill_search_results(
+                'Dilan 1990',
+                movies,
+                early_results,
+                top_n=20,
+            )
+
+            assert len(early_results) == 2
+            assert len(results) == 20
+            assert results[0]['id'] == 1
+            assert results[1]['id'] == 2
+            assert len({movie['id'] for movie in results}) == 20
+            assert all(
+                movie['relevance'].startswith('Kecocokan rendah berdasarkan ')
+                for movie in results[2:]
+            )
+
+    def test_single_word_search_includes_genre_matches_with_low_relevance(self, app):
+        with app.app_context():
+            service = MovieService()
+            movies = [
+                {
+                    'id': 1,
+                    'title': 'The Enchanted Realm',
+                    'overview': 'A young hero searches for a lost crown.',
+                    'genres': [{'name': 'Fantasy'}],
+                },
+                {
+                    'id': 2,
+                    'title': 'A Quiet Journey',
+                    'overview': 'A family travels across the mountains.',
+                    'genres': [{'name': 'Drama'}],
+                },
+            ]
+
+            recommendations = service.recommend_similar_movies(
+                'fantasy', movies, top_n=20
+            )
+
+            assert recommendations is not None
+            assert recommendations[0]['id'] == 1
+            assert recommendations[0]['relevance'] == 'Mirip berdasarkan genre'
+
+    def test_single_word_movie_title_does_not_recommend_genre_only_movies(self, app):
+        with app.app_context():
+            service = MovieService()
+            movies = [
+                {
+                    'id': 1,
+                    'title': 'Komang',
+                    'overview': '',
+                    'director': 'Naya Anindita',
+                    'genres': [{'name': 'Drama'}, {'name': 'Romance'}],
+                },
+                {
+                    'id': 2,
+                    'title': '99 Nama Cinta',
+                    'overview': 'A journalist meets a religious teacher.',
+                    'director': 'Another director',
+                    'genres': [{'name': 'Drama'}, {'name': 'Romance'}],
+                },
+                {
+                    'id': 3,
+                    'title': 'Eggnoid',
+                    'overview': 'A young woman encounters a mysterious android.',
+                    'director': 'Naya Anindita',
+                    'genres': [{'name': 'Drama'}, {'name': 'Romance'}],
+                },
+            ]
+            service._semantic_model_unavailable = True
+
+            recommendations = service.recommend_similar_movies(
+                'Komang', movies, top_n=20
+            )
+
+            assert recommendations is not None
+            assert [movie['id'] for movie in recommendations] == [1, 3, 2]
+            assert recommendations[1]['relevance'] == (
+                'Mirip berdasarkan genre dan sutradara'
+            )
+            assert recommendations[2]['relevance'] == (
+                'Kecocokan berdasarkan genre'
+            )
+
+    def test_single_word_search_returns_title_and_overview_matches_not_genre_matches(self, app):
+        with app.app_context():
+            service = MovieService()
+            movies = [
+                {
+                    'id': 1,
+                    'title': 'Keadilan',
+                    'overview': 'A courtroom drama.',
+                    'genres': [{'name': 'Drama'}],
+                },
+                {
+                    'id': 2,
+                    'title': 'Milea: Suara dari Dilan',
+                    'overview': 'A high school romance about young students and love.',
+                    'genres': [{'name': 'Romance'}],
+                },
+                {
+                    'id': 3,
+                    'title': 'Kisah di Bandung',
+                    'overview': 'Dilan meets Milea at school.',
+                    'genres': [{'name': 'Drama'}],
+                },
+                {
+                    'id': 4,
+                    'title': 'Drama Keluarga',
+                    'overview': 'A family faces a difficult decision.',
+                    'genres': [{'name': 'Drama'}],
+                },
+                {
+                    'id': 5,
+                    'title': 'Young Hearts',
+                    'overview': 'A romance follows high school students falling in love.',
+                    'genres': [{'name': 'Comedy'}],
+                },
+                {
+                    'id': 26,
+                    'title': 'MeloDylan',
+                    'overview': 'A school story about music.',
+                    'genres': [{'name': 'Drama'}],
+                },
+                {
+                    'id': 27,
+                    'title': 'Dilanjutkan Salah Disudahi Perih',
+                    'overview': 'A story about relationships.',
+                    'genres': [{'name': 'Drama'}],
+                },
+            ]
+            movies.extend(
+                {
+                    'id': movie_id,
+                    'title': f'Unrelated title {movie_id}',
+                    'overview': f'A report about subject number {movie_id}.',
+                    'genres': [{'name': 'Documentary'}],
+                }
+                for movie_id in range(6, 26)
+            )
+
+            recommendations = service.recommend_similar_movies('dilan', movies, top_n=20)
+
+            assert recommendations is not None
+            recommended_ids = [movie['id'] for movie in recommendations]
+            assert 1 <= len(recommendations) <= 20
+            assert recommended_ids[0] == 2
+            assert 3 in recommended_ids
+            assert 4 not in recommended_ids
+            assert len(recommended_ids) == len(set(recommended_ids))
+            assert all(movie['relevance'] for movie in recommendations)
+
+            substring_results = service.recommend_similar_movies('melo', movies, top_n=20)
+            assert substring_results[0]['id'] == 26
+
+            multiword_results = service.recommend_similar_movies(
+                'dilan salah', movies, top_n=20
+            )
+            assert multiword_results[0]['id'] == 27
+            assert multiword_results[0]['relevance'] == (
+                'Kecocokan rendah berdasarkan judul sebagian'
+            )
+            assert all(movie['relevance'] for movie in multiword_results)
+
     def test_search_movies_csv_service(self, app):
         """Test movie search with CSV service"""
         with app.app_context():
@@ -397,6 +898,28 @@ class TestMovieService:
             # Test search
             results = service.search_movies('test', movies)
             assert isinstance(results, list)
+
+    def test_search_movies_fills_twenty_results_with_closest_movies(self, app):
+        with app.app_context():
+            service = MovieService()
+            movies = [
+                {
+                    'id': index,
+                    'title': f'Unrelated film {index}',
+                    'overview': f'An unrelated story about character {index}.',
+                    'genres': [],
+                    'popularity': index,
+                }
+                for index in range(25)
+            ]
+
+            results = service.search_movies('quasarquery', movies)
+
+            assert len(results) == 20
+            assert all(
+                movie['relevance'] == ''
+                for movie in results
+            )
     
     def test_get_movie_by_id_csv_service(self, app):
         """Test getting movie by ID with CSV service"""

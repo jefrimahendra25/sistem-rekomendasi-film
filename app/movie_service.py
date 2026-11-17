@@ -3,6 +3,9 @@ Modul layanan film untuk menangani logika bisnis terkait film
 """
 import os
 import re
+import csv
+import hashlib
+import math
 import pandas as pd
 import logging
 from datetime import datetime
@@ -10,6 +13,7 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 import numpy as np
 from scipy import stats
 import json
+from difflib import SequenceMatcher
 from fuzzywuzzy import fuzz
 from fuzzywuzzy import process
 import logging
@@ -22,6 +26,35 @@ logger = logging.getLogger(__name__)
 class MovieService:
     """Kelas layanan untuk operasi terkait film"""
 
+    @staticmethod
+    def _has_usable_synopsis(value):
+        synopsis = re.sub(r'[^a-z0-9]+', ' ', str(value or '').casefold()).strip()
+        return bool(synopsis) and synopsis not in {
+            'belum tersedia',
+            'belum diketahui',
+            'belum ada sinopsis',
+            'plot belum tersedia',
+            'plot belum diketahui',
+            'not available',
+            'unknown',
+            'n a',
+            'tidak tersedia',
+        }
+
+    @staticmethod
+    def _as_float(value, default=0.0):
+        """Normalisasi angka dari string/float/int ke float agar sorting konsisten."""
+        if value is None or value == '':
+            return default
+        try:
+            if isinstance(value, bool):
+                return float(value)
+            if isinstance(value, (int, float)):
+                return float(value)
+            return float(str(value).replace(',', '.').strip())
+        except (TypeError, ValueError):
+            return default
+
     def __init__(self):
         self._movies_cache = None
         self._last_updated = None
@@ -30,6 +63,217 @@ class MovieService:
         self._tfidf_matrix = None
         self._movie_ids = None
         self._tfidf_initialized = False
+        self._semantic_model = None
+        self._semantic_embeddings = None
+        self._semantic_embeddings_key = None
+        self._semantic_model_unavailable = False
+
+    @staticmethod
+    def _format_similarity_label(evidence):
+        if len(evidence) == 1:
+            basis = evidence[0]
+        elif len(evidence) == 2:
+            basis = f"{evidence[0]} dan {evidence[1]}"
+        else:
+            basis = f"{', '.join(evidence[:-1])}, dan {evidence[-1]}"
+        return f"Mirip berdasarkan {basis}"
+
+    @staticmethod
+    def _relevance_tier(label):
+        if 'judul' in label:
+            return 0
+        if 'sinopsis' in label:
+            return 1
+        if 'genre' in label and 'sutradara' in label:
+            return 2
+        if label.startswith('Kecocokan rendah') or label == 'Kecocokan berdasarkan genre':
+            return 3
+        return 4
+
+    @staticmethod
+    def get_relevance_status(
+        query_movie,
+        movie,
+        semantic_similarity=None,
+        synopsis_similarity=None,
+    ):
+        """Return the shared binary relevance decision and its display label."""
+        query_id = query_movie.get('id')
+        movie_id = movie.get('id')
+        if query_id is not None and str(query_id) == str(movie_id):
+            return False, ''
+
+        def genre_names(item):
+            genres = set()
+            for genre in item.get('genres', []):
+                name = genre.get('name', '') if isinstance(genre, dict) else genre
+                if name:
+                    genres.add(str(name).lower().strip())
+            return genres
+
+        query_genres = genre_names(query_movie)
+        movie_genres = genre_names(movie)
+        shared_genres = query_genres.intersection(movie_genres)
+        query_overview = str(query_movie.get('overview', '') or '').strip()
+        has_usable_overviews = (
+            MovieService._has_usable_synopsis(query_overview)
+            and MovieService._has_usable_synopsis(movie.get('overview'))
+        )
+        query_director = str(query_movie.get('director', '') or '').strip().casefold()
+        movie_director = str(movie.get('director', '') or '').strip().casefold()
+        has_director_match = (
+            query_director not in {'', 'tidak tersedia', 'unknown', 'n/a'}
+            and query_director == movie_director
+        )
+        query_title = str(query_movie.get('title', '')).lower()
+        movie_title = str(movie.get('title', '')).lower()
+        query_words = set(re.findall(r'\w+', query_title))
+        movie_words = set(re.findall(r'\w+', movie_title))
+        query_numbers = {word for word in query_words if word.isdigit()}
+        movie_numbers = {word for word in movie_words if word.isdigit()}
+        query_non_numeric_words = query_words - query_numbers
+        movie_non_numeric_words = movie_words - movie_numbers
+        has_numbered_title_variant = (
+            bool(query_numbers)
+            and bool(movie_numbers)
+            and bool(query_non_numeric_words)
+            and query_non_numeric_words.issubset(movie_non_numeric_words)
+            and not query_numbers.intersection(movie_numbers)
+        )
+        has_title_evidence = bool(query_words) and (
+            query_words.issubset(movie_words)
+            or has_numbered_title_variant
+        )
+
+        stop_words = {
+            'a', 'an', 'the', 'and', 'or', 'but', 'about', 'of', 'to', 'in',
+            'on', 'for', 'with', 'is', 'are', 'was', 'were', 'this', 'that',
+            'from', 'by', 'as', 'at', 'it', 'its', 'yang', 'dan', 'di', 'ke',
+            'dari', 'untuk', 'pada', 'dengan', 'sebuah', 'ini', 'itu',
+        }
+        query_overview_words = set(re.findall(
+            r'\w+', str(query_movie.get('overview', '') or '')[:500].lower()
+        )) - stop_words
+        movie_overview_words = set(re.findall(
+            r'\w+', str(movie.get('overview', '') or '')[:500].lower()
+        )) - stop_words
+        lexical_overview_score = (
+            len(query_overview_words.intersection(movie_overview_words))
+            / len(query_overview_words)
+            if query_overview_words else 0.0
+        )
+        semantic_overview_score = (
+            max(0.0, min(1.0, float(semantic_similarity)))
+            if semantic_similarity is not None else 0.0
+        )
+        tfidf_overview_score = (
+            max(0.0, min(1.0, float(synopsis_similarity)))
+            if synopsis_similarity is not None else 0.0
+        )
+        has_overview_evidence = has_usable_overviews and (
+            semantic_overview_score >= 0.55
+            or tfidf_overview_score >= 0.1
+            or (
+                semantic_similarity is None
+                and synopsis_similarity is None
+                and lexical_overview_score >= 0.3
+            )
+        )
+
+        has_genre_director_evidence = bool(shared_genres) and has_director_match
+        has_director_evidence = has_director_match and (
+            has_title_evidence or has_overview_evidence
+        )
+        relevant = (
+            has_title_evidence
+            or has_overview_evidence
+            or has_genre_director_evidence
+        )
+        if not relevant:
+            return False, ''
+
+        evidence = []
+        if has_title_evidence:
+            evidence.append('judul')
+        if has_overview_evidence:
+            evidence.append('sinopsis')
+        if shared_genres:
+            evidence.append('genre')
+        if has_director_evidence or has_genre_director_evidence:
+            evidence.append('sutradara')
+        return True, MovieService._format_similarity_label(evidence)
+
+    def _get_semantic_similarity_scores(self, movies, reference_indices):
+        """Return max multilingual synopsis cosine similarity per movie, if available."""
+        import numpy as np
+
+        if self._semantic_model_unavailable:
+            return None
+
+        overviews = [
+            str(self._get_movie_search_terms(movie)['overview'] or '')[:2000].strip()
+            for movie in movies
+        ]
+        if not any(overviews[index] for index in reference_indices):
+            return None
+
+        cache_digest = hashlib.sha256()
+        for movie, overview in zip(movies, overviews):
+            cache_digest.update(str(movie.get('id', '')).encode('utf-8'))
+            cache_digest.update(b'\0')
+            cache_digest.update(overview.encode('utf-8'))
+            cache_digest.update(b'\0')
+        cache_key = cache_digest.hexdigest()
+
+        try:
+            if self._semantic_model is None:
+                from sentence_transformers import SentenceTransformer
+
+                self._semantic_model = SentenceTransformer(
+                    'sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2'
+                )
+
+            if (
+                self._semantic_embeddings is None
+                or self._semantic_embeddings_key != cache_key
+            ):
+                non_empty_indices = [
+                    index for index, overview in enumerate(overviews) if overview
+                ]
+                get_embedding_dimension = getattr(
+                    self._semantic_model, 'get_embedding_dimension', None
+                )
+                embedding_size = (
+                    get_embedding_dimension()
+                    if get_embedding_dimension
+                    else self._semantic_model.get_sentence_embedding_dimension()
+                )
+                embeddings = np.zeros(
+                    (len(movies), embedding_size), dtype=np.float32
+                )
+                if non_empty_indices:
+                    encoded = self._semantic_model.encode(
+                        [overviews[index] for index in non_empty_indices],
+                        batch_size=64,
+                        convert_to_numpy=True,
+                        normalize_embeddings=True,
+                        show_progress_bar=False,
+                    )
+                    embeddings[non_empty_indices] = encoded
+                self._semantic_embeddings = embeddings
+                self._semantic_embeddings_key = cache_key
+
+            reference_embeddings = self._semantic_embeddings[reference_indices]
+            similarities = reference_embeddings @ self._semantic_embeddings.T
+            return np.clip(similarities.max(axis=0), 0.0, 1.0)
+        except Exception as error:
+            self._semantic_model_unavailable = True
+            logger.warning(
+                "Semantic synopsis similarity is unavailable; using TF-IDF "
+                "synopsis similarity instead: %s",
+                error,
+            )
+            return None
 
     def load_movies(self, force_reload=False):
         """Memuat data film dengan caching dari file CSV"""
@@ -46,6 +290,37 @@ class MovieService:
             self._movies_cache = movies
             self._last_updated = datetime.now()
 
+        return movies
+
+    def _apply_movie_metadata_overrides(self, movies, overrides_path=None):
+        """Fill missing catalog metadata from verified, ID-matched overrides."""
+        from app.utils import get_movie_metadata_overrides_path
+
+        overrides_path = overrides_path or get_movie_metadata_overrides_path()
+        if not os.path.exists(overrides_path):
+            return movies
+
+        movies_by_id = {
+            str(movie.get('id')): movie
+            for movie in movies
+            if movie.get('id') is not None
+        }
+        with open(overrides_path, encoding='utf-8-sig', newline='') as file:
+            for override in csv.DictReader(file):
+                movie = movies_by_id.get(str(override.get('id', '')).strip())
+                if not movie:
+                    continue
+                for field in ('overview', 'director'):
+                    value = str(override.get(field, '') or '').strip()
+                    existing = str(movie.get(field, '') or '').strip()
+                    if (
+                        self._has_usable_synopsis(value)
+                        and not self._has_usable_synopsis(existing)
+                    ):
+                        movie[field] = value
+                language = str(override.get('overview_language', '') or '').strip()
+                if language and self._has_usable_synopsis(movie.get('overview')):
+                    movie['overview_language'] = language
         return movies
 
     def _load_from_csv(self):
@@ -80,7 +355,7 @@ class MovieService:
             logger.debug(f"Kolom yang tersedia: {df.columns.tolist()}")
 
             movies = []
-            for index, row in df.iterrows():
+            for index, row in enumerate(df.to_dict(orient='records')):
                 try:
                     # Skip baris yang tidak memiliki ID
                     if pd.isna(row.get('id')) or str(row.get('id')).strip() == '':
@@ -246,6 +521,7 @@ class MovieService:
                     logger.warning(f"Error parsing movie row: {e}")
                     continue
 
+            movies = self._apply_movie_metadata_overrides(movies)
             logger.info(f"Berhasil memuat {len(movies)} film dari CSV")
             return movies
 
@@ -485,10 +761,13 @@ class MovieService:
         elif sort_type == 'newest':
             return self._sort_newest(movies)
         elif sort_type == 'popular':
-            # Untuk endpoint /popular, test mengharapkan urutan berdasarkan field `popularity`.
-            return sorted(movies, key=lambda x: x.get('popularity', 0) or 0, reverse=True)
+            return self._sort_popular(movies)
         else:
-            return sorted(movies, key=lambda x: x.get('vote_average', 0), reverse=True)
+            return sorted(
+                movies,
+                key=lambda x: self._as_float(x.get('vote_average', 0), 0.0),
+                reverse=True,
+            )
 
 
     def _sort_trending(self, movies):
@@ -535,34 +814,48 @@ class MovieService:
                 
         return sorted(movies, key=get_release_date, reverse=True)
 
+    def _weighted_rating(self, movie):
+        """Return the same vote-count-adjusted rating used by the Popular tab."""
+        vote_avg = self._as_float(movie.get('vote_average'), 0.0)
+        vote_count = self._as_float(movie.get('vote_count'), 0.0)
+        minimum_votes = 100
+        mean_rating = 5.0
+        return (
+            (vote_avg * vote_count) / (vote_count + minimum_votes)
+            + (minimum_votes * mean_rating) / (vote_count + minimum_votes)
+        )
+
     def _sort_popular(self, movies):
-        """Sort berdasarkan popularitas - fokus pada rating tertinggi"""
-        def get_popularity_score(movie):
-            vote_avg = movie.get('vote_average', 0)
-            vote_count = movie.get('vote_count', 0)
-            
-            # Formula TMDb weighted rating
-            # (v / (v + m) * r) + (m / (v + m) * C)
-            # di mana:
-            # v = jumlah vote
-            # m = minimum vote yang dibutuhkan
-            # r = rating rata-rata film
-            # C = mean vote di seluruh laporan
-            
-            m = 100  # minimum votes required
-            C = 5.0  # mean vote across the whole report
-            
-            if vote_count >= m:
-                return (vote_avg * vote_count) / (vote_count + m) + (m * C) / (vote_count + m)
-            return 0
-            
-        return sorted(movies, key=get_popularity_score, reverse=True)
+        """Sort berdasarkan rating berbobot tertinggi."""
+        return sorted(movies, key=self._weighted_rating, reverse=True)
 
     def _title_similarity(self, title1, title2):
         """Hitung kemiripan judul menggunakan fuzzy matching"""
         if not title1 or not title2:
             return 0.0
         return fuzz.token_sort_ratio(str(title1).lower(), str(title2).lower()) / 100.0
+
+    def _title_keyword_match_score(self, query_token, title_tokens):
+        """Match a query word inside title tokens, including common i/y spelling variants."""
+        variants = {query_token}
+        if 'i' in query_token:
+            variants.add(query_token.replace('i', 'y'))
+        if 'y' in query_token:
+            variants.add(query_token.replace('y', 'i'))
+
+        if any(query_token == title_token for title_token in title_tokens):
+            return 3.0
+        if len(query_token) >= 3 and any(
+            query_token in title_token for title_token in title_tokens
+        ):
+            return 2.0
+        if len(query_token) >= 4 and any(
+            variant != query_token and variant in title_token
+            for variant in variants
+            for title_token in title_tokens
+        ):
+            return 1.8
+        return 0.0
         
     def _parse_genres(self, genre_data):
         """Parse data genre dari berbagai format ke set"""
@@ -639,7 +932,12 @@ class MovieService:
         Catatan: Requirement menyebutkan judul ditulis 3x agar lebih besar hasilnya.
         """
         title = str(movie.get('title', '')).lower()
-        overview = str(movie.get('overview', '')).lower()
+        raw_overview = str(movie.get('overview', '')).lower()
+        overview = (
+            raw_overview
+            if self._has_usable_synopsis(raw_overview)
+            else ''
+        )
 
         # Dapatkan genre dalam format yang konsisten
         raw_genres = movie.get('genres', [])
@@ -655,32 +953,36 @@ class MovieService:
             else:
                 genres_list.append(str(genre).lower())
         genres = ' '.join(genres_list)
+        director = str(movie.get('director', '') or '').lower().strip()
         keywords = movie.get('keywords', '')
         if isinstance(keywords, list):
             keywords = ' '.join(str(keyword) for keyword in keywords)
         keywords = str(keywords).lower()
 
-        # Gabungkan semua term pencarian dengan bobot berbeda
+        # Gabungkan semua term pencarian dengan bobot berbeda.
+        # Bobot title 3x lebih besar dibanding genre agar hasil lebih sesuai judul.
         search_terms = {
             'title': title,
             'title_words': set(title.split()),
             'overview': overview,
             'genres': genres,
-            # judul diulang 3x
-            'all_terms': f"{title} {title} {title} {overview} {genres} {genres} {keywords}"
+            'director': director,
+            'keywords': keywords,
+            'all_terms': (
+                f"{title} {title} {title} {overview} {genres} {director} {keywords}"
+            ),
+            'recommendation_terms': (
+                f"{title} {title} {title} {overview} {genres} {director}"
+            ),
         }
         return search_terms
 
-    def _recommend_content_similar(self, reference_indices, movies, top_n, include_references=False):
-        """Rank films by TF-IDF cosine similarity to one or more reference films."""
-        from sklearn.feature_extraction.text import TfidfVectorizer
-        from sklearn.metrics.pairwise import linear_kernel
-        import numpy as np
+    def calculate_pcc_scores(self, query, movies, terms_key='all_terms'):
+        """Return normalized Pearson correlation scores for movies against a query."""
+        query = str(query or '').strip().lower()
+        if not query or not movies:
+            return {}
 
-        if not reference_indices or not movies:
-            return []
-
-        documents = [self._get_movie_search_terms(movie)['all_terms'] for movie in movies]
         stop_words = [
             'yang', 'di', 'ke', 'dari', 'dan', 'atau', 'dengan', 'untuk', 'pada',
             'the', 'and', 'of', 'to', 'in', 'a', 'is', 'it', 'that', 'was', 'as', 'on'
@@ -689,19 +991,138 @@ class MovieService:
             stop_words=stop_words,
             ngram_range=(1, 2),
             min_df=1,
-            max_df=0.95,
-            sublinear_tf=True
+            max_df=1.0,
         )
-        content_matrix = vectorizer.fit_transform(documents)
-        reference_similarities = linear_kernel(content_matrix[reference_indices], content_matrix)
-        similarity_scores = np.asarray(reference_similarities).max(axis=0)
-        reference_indices = set(reference_indices)
+        if not vectorizer.build_analyzer()(query):
+            return {
+                str(movie.get('id')): 0.0
+                for movie in movies
+                if movie.get('id') is not None
+            }
+
+        documents = [
+            self._get_movie_search_terms(movie).get(terms_key, '')
+            for movie in movies
+        ]
+        matrix = vectorizer.fit_transform([query] + documents)
+        query_vector = matrix[0].toarray().ravel()
+        if len(query_vector) < 2 or np.std(query_vector) == 0:
+            return {
+                str(movie.get('id')): 0.0
+                for movie in movies
+                if movie.get('id') is not None
+            }
+
+        scores = {}
+        for index, movie in enumerate(movies, start=1):
+            movie_id = movie.get('id')
+            if movie_id is None:
+                continue
+
+            movie_vector = matrix[index].toarray().ravel()
+            if np.std(movie_vector) == 0:
+                score = 0.0
+            else:
+                pcc, _ = stats.pearsonr(query_vector, movie_vector)
+                score = (pcc + 1) / 2
+                score = max(0.0, min(1.0, float(score)))
+
+            scores[str(movie_id)] = score
+
+        return scores
+
+    @staticmethod
+    def sort_search_results_by_pcc(movies):
+        """Sort search results by PCC descending, then popularity descending."""
+        def score(movie, key):
+            value = MovieService._as_float(movie.get(key))
+            return value if math.isfinite(value) else 0.0
+
+        return sorted(
+            movies,
+            key=lambda movie: (
+                -score(movie, 'pcc_similarity'),
+                -score(movie, 'popularity'),
+            ),
+        )
+
+    def _recommend_content_similar(
+        self,
+        reference_indices,
+        movies,
+        top_n,
+        include_references=False,
+    ):
+        """Rank films by weighted TF-IDF similarity, prioritizing titles over genres."""
+        from sklearn.feature_extraction.text import TfidfVectorizer
+        from sklearn.metrics.pairwise import linear_kernel
+        import numpy as np
+
+        if not reference_indices or not movies:
+            return []
+
+        search_terms = [self._get_movie_search_terms(movie) for movie in movies]
+        stop_words = [
+            'yang', 'di', 'ke', 'dari', 'dan', 'atau', 'dengan', 'untuk', 'pada',
+            'the', 'and', 'of', 'to', 'in', 'a', 'is', 'it', 'that', 'was', 'as', 'on'
+        ]
+        field_scores = {}
+        for field in ('title', 'overview', 'genres'):
+            documents = [terms[field] for terms in search_terms]
+            if not any(document.strip() for document in documents):
+                field_scores[field] = np.zeros(len(movies))
+                continue
+
+            vectorizer = TfidfVectorizer(
+                stop_words=stop_words,
+                ngram_range=(1, 2),
+                min_df=1,
+                max_df=1.0,
+                sublinear_tf=True
+            )
+            field_matrix = vectorizer.fit_transform(documents)
+            reference_similarities = linear_kernel(field_matrix[reference_indices], field_matrix)
+            field_scores[field] = np.asarray(reference_similarities).max(axis=0)
+
+        semantic_scores = self._get_semantic_similarity_scores(
+            movies, reference_indices
+        )
+        has_semantic_scores = semantic_scores is not None
+        if semantic_scores is None:
+            semantic_scores = field_scores['overview']
+
+        reference_indices = list(reference_indices)
+        reference_index_set = set(reference_indices)
+        director_scores = np.zeros(len(movies))
+        has_reference_director = False
+        for reference_index in reference_indices:
+            director = str(
+                movies[reference_index].get('director', '') or ''
+            ).strip().casefold()
+            if director in {'', 'tidak tersedia', 'unknown', 'n/a'}:
+                continue
+            has_reference_director = True
+            for index, movie in enumerate(movies):
+                candidate_director = str(
+                    movie.get('director', '') or ''
+                ).strip().casefold()
+                if candidate_director == director:
+                    director_scores[index] = 1.0
+
+        director_weight = 1 if has_reference_director else 0
+        total_weight = 5 + director_weight
+        similarity_scores = (
+            3 * field_scores['title']
+            + semantic_scores
+            + field_scores['genres']
+            + director_weight * director_scores
+        ) / total_weight
 
         ranked_indices = sorted(
             (
                 (float(score), index)
                 for index, score in enumerate(similarity_scores)
-                if index not in reference_indices and score > 0
+                if index not in reference_index_set
             ),
             key=lambda item: (-item[0], item[1])
         )
@@ -709,8 +1130,100 @@ class MovieService:
             [movies[index].copy() for index in reference_indices]
             if include_references else []
         )
+        for movie in reference_movies:
+            movie['relevance'] = 'Mirip berdasarkan judul'
         remaining_slots = max(0, top_n - len(reference_movies))
-        similar_movies = [movies[index].copy() for _, index in ranked_indices[:remaining_slots]]
+        relevant_indices = []
+        relevant_movie_indices = set()
+        for score, index in ranked_indices:
+            candidate = movies[index]
+            matching_status = None
+            for reference_index in reference_indices:
+                status = self.get_relevance_status(
+                    movies[reference_index],
+                    candidate,
+                    semantic_similarity=(
+                        float(semantic_scores[index])
+                        if has_semantic_scores
+                        else None
+                    ),
+                    synopsis_similarity=float(field_scores['overview'][index]),
+                )
+                if status[0]:
+                    matching_status = status
+                    break
+            if matching_status:
+                label = matching_status[1]
+                if 'judul' in label:
+                    tier = 0
+                    tier_score = field_scores['title'][index]
+                elif 'sinopsis' in label:
+                    tier = 1
+                    tier_score = semantic_scores[index]
+                else:
+                    tier = 2
+                    tier_score = (
+                        field_scores['genres'][index] + director_scores[index]
+                    ) / 2
+                relevant_indices.append((
+                    tier,
+                    -float(tier_score),
+                    -score,
+                    index,
+                    label,
+                ))
+                relevant_movie_indices.add(index)
+
+        relevant_indices.sort()
+        similar_movies = []
+        for _, _, _, index, relevance_label in relevant_indices[:remaining_slots]:
+            movie = movies[index].copy()
+            movie['relevance'] = relevance_label
+            movie['synopsis_similarity'] = float(field_scores['overview'][index])
+            if has_semantic_scores:
+                movie['semantic_similarity'] = float(semantic_scores[index])
+            similar_movies.append(movie)
+
+        if len(similar_movies) < remaining_slots:
+            has_reference_synopsis = any(
+                self._has_usable_synopsis(movies[index].get('overview'))
+                for index in reference_indices
+            )
+            for score, index in ranked_indices:
+                if index in relevant_movie_indices:
+                    continue
+                movie = movies[index].copy()
+                shared_genres = set(search_terms[index]['genres'].split()).intersection(
+                    *(
+                        set(search_terms[reference_index]['genres'].split())
+                        for reference_index in reference_indices
+                    )
+                )
+                same_director = any(
+                    director_scores[index] == 1
+                    and str(movies[reference_index].get('director', '') or '')
+                    .strip()
+                    .casefold()
+                    == str(movie.get('director', '') or '').strip().casefold()
+                    for reference_index in reference_indices
+                )
+                if shared_genres:
+                    movie['relevance'] = (
+                        'Kecocokan rendah berdasarkan genre saja'
+                        if has_reference_synopsis
+                        else 'Kecocokan berdasarkan genre'
+                    )
+                elif same_director:
+                    movie['relevance'] = 'Kecocokan rendah berdasarkan sutradara saja'
+                else:
+                    movie['relevance'] = 'Kecocokan rendah berdasarkan skor konten terdekat'
+                movie['synopsis_similarity'] = float(field_scores['overview'][index])
+                if has_semantic_scores:
+                    movie['semantic_similarity'] = float(semantic_scores[index])
+                similar_movies.append(movie)
+                if len(similar_movies) >= remaining_slots:
+                    break
+
         return (reference_movies + similar_movies)[:top_n]
 
     def recommend_similar_movies(self, query, movies, top_n=20):
@@ -722,11 +1235,261 @@ class MovieService:
         if not normalized_query:
             return None
 
+        query_tokens = set(self._tokenize_text(normalized_query))
+        if len(query_tokens) > 1:
+            exact_title_indices = [
+                index for index, movie in enumerate(movies)
+                if re.sub(
+                    r'[^a-z0-9]+', ' ', str(movie.get('title', '')).lower()
+                ).strip() == normalized_query
+            ]
+            if not exact_title_indices:
+                component_matches = []
+                for index, movie in enumerate(movies):
+                    title_tokens = self._tokenize_text(movie.get('title', ''))
+                    token_scores = [
+                        self._title_keyword_match_score(token, title_tokens)
+                        for token in query_tokens
+                    ]
+                    if token_scores and all(token_scores):
+                        component_matches.append((sum(token_scores), index))
+
+                if component_matches:
+                    component_matches.sort(key=lambda item: (-item[0], item[1]))
+                    exact_component_matches = [
+                        (score, index)
+                        for score, index in component_matches
+                        if score == 3.0 * len(query_tokens)
+                    ]
+                    reference_indices = [
+                        index for _, index in exact_component_matches
+                    ]
+                    matched_titles = []
+                    for score, index in component_matches:
+                        matched_title = movies[index].copy()
+                        matched_title['relevance'] = (
+                            'Mirip berdasarkan judul'
+                            if score == 3.0 * len(query_tokens)
+                            else 'Kecocokan rendah berdasarkan judul sebagian'
+                        )
+                        matched_titles.append(matched_title)
+                    related_titles = self._recommend_content_similar(
+                        reference_indices,
+                        movies,
+                        max(0, top_n - len(matched_titles)),
+                    )
+                    results = matched_titles + related_titles
+                    return results[:top_n]
+
+        if len(query_tokens) == 1:
+            query_token = next(iter(query_tokens))
+            title_matches = []
+            title_variant_matches = []
+            overview_matches = []
+            genre_matches = []
+
+            for index, movie in enumerate(movies):
+                terms = self._get_movie_search_terms(movie)
+                title_tokens = self._tokenize_text(terms['title'])
+                overview_tokens = self._tokenize_text(terms['overview'])
+                genre_tokens = self._tokenize_text(terms['genres'])
+                title_match_score = self._title_keyword_match_score(
+                    query_token, title_tokens
+                )
+                if title_match_score == 3.0:
+                    matched_movie = movie.copy()
+                    matched_movie['relevance'] = 'Mirip berdasarkan judul'
+                    title_matches.append((title_match_score, index, matched_movie))
+                elif title_match_score:
+                    matched_movie = movie.copy()
+                    matched_movie['relevance'] = (
+                        'Kecocokan rendah berdasarkan judul sebagian'
+                    )
+                    title_variant_matches.append(
+                        (title_match_score, index, matched_movie)
+                    )
+                else:
+                    if query_token in overview_tokens:
+                        matched_movie = movie.copy()
+                        matched_movie['relevance'] = 'Mirip berdasarkan sinopsis'
+                        overview_matches.append((1.0, index, matched_movie))
+                    elif query_token in genre_tokens:
+                        matched_movie = movie.copy()
+                        matched_movie['relevance'] = 'Mirip berdasarkan genre'
+                        genre_matches.append((0.1, index, matched_movie))
+
+            if title_matches:
+                reference_indices = [index for _, index, _ in title_matches]
+                matched_titles = [
+                    movie.copy() for _, _, movie in title_matches
+                ]
+                reference_index_set = set(reference_indices)
+                matched_titles.extend(
+                    movie.copy()
+                    for _, index, movie in sorted(
+                        title_variant_matches,
+                        key=lambda item: (-item[0], item[1]),
+                    )
+                    if index not in reference_index_set
+                )
+                related_movies = self._recommend_content_similar(
+                    reference_indices,
+                    movies,
+                    max(0, top_n - len(matched_titles)),
+                )
+                matched_keys = {
+                    str(movie.get('id'))
+                    if movie.get('id') is not None
+                    else str(movie.get('title', '')).casefold()
+                    for movie in matched_titles
+                }
+                unique_related_movies = []
+                for movie in related_movies:
+                    movie_key = (
+                        str(movie.get('id'))
+                        if movie.get('id') is not None
+                        else str(movie.get('title', '')).casefold()
+                    )
+                    if movie_key in matched_keys:
+                        continue
+                    matched_keys.add(movie_key)
+                    unique_related_movies.append(movie)
+                return (matched_titles + unique_related_movies)[:top_n]
+
+            title_matches.sort(key=lambda item: item[1])
+            title_variant_matches.sort(key=lambda item: (-item[0], item[1]))
+            overview_matches.sort(key=lambda item: item[1])
+            genre_matches.sort(key=lambda item: (-item[0], item[1]))
+            reference_indices = [index for _, index, _ in title_matches]
+            matched_indices = {
+                index for _, index, _ in (
+                    title_matches + title_variant_matches + overview_matches + genre_matches
+                )
+            }
+
+            related_movies = []
+            fallback_movies = []
+            if reference_indices:
+                from sklearn.feature_extraction.text import TfidfVectorizer
+                from sklearn.metrics.pairwise import linear_kernel
+                import numpy as np
+                from sklearn.preprocessing import normalize
+
+                stop_words = [
+                    'yang', 'di', 'ke', 'dari', 'dan', 'atau', 'dengan', 'untuk', 'pada',
+                    'the', 'and', 'of', 'to', 'in', 'a', 'is', 'it', 'that', 'was', 'as', 'on',
+                    'film', 'cerita', 'kisah', 'tahun', 'sebuah', 'adalah', 'ini', 'itu',
+                    'dalam', 'oleh', 'sebagai', 'merupakan', 'akan', 'saat', 'mereka',
+                    'seorang', 'orang', 'menceritakan', 'mengisahkan', 'hidup', 'tentang',
+                    'ia', 'nya', 'juga', 'tidak', 'lebih', 'sama', 'berjudul',
+                    'diadaptasi', 'karya', 'menjadi', 'setelah', 'ketika', 'karena',
+                    'hingga', 'sampai', 'dimana', 'tersebut', 'sangat', 'seperti', 'bernama',
+                    'ada', 'baru', 'bersama', 'kembali', 'kini', 'lain', 'bisa', 'hal',
+                    'memiliki', 'membuat', 'perjalanan', 'terjadi', 'mulai', 'selalu',
+                    'masa', 'tak', 'saling', 'mendapatkan', 'menemukan', 'mengalami',
+                    'menghadapi', 'membawa', 'pernah', 'akhirnya', 'awal', 'awalnya',
+                    'tengah', 'antara', 'salah', 'satu', 'dua', 'pertama', 'semua',
+                    'dengan', 'karakter', 'setiap', 'sebelum', 'sesudah', 'kali',
+                ]
+                overviews = [
+                    self._get_movie_search_terms(movie)['overview']
+                    for movie in movies
+                ]
+                content_overviews = [
+                    ' '.join(
+                        token for token in self._tokenize_text(overview)
+                        if token not in stop_words
+                    )
+                    for overview in overviews
+                ]
+                synopsis_scores = np.zeros(len(movies))
+                reference_tokens = set()
+                if any(overview.strip() for overview in content_overviews):
+                    vectorizer = TfidfVectorizer(
+                        stop_words=stop_words,
+                        ngram_range=(1, 2),
+                        min_df=1,
+                        max_df=0.95,
+                        sublinear_tf=True,
+                    )
+                    overview_matrix = vectorizer.fit_transform(content_overviews)
+                    synopsis_profile = normalize(
+                        np.asarray(overview_matrix[reference_indices].mean(axis=0))
+                    )
+                    synopsis_scores = linear_kernel(synopsis_profile, overview_matrix).ravel()
+                    reference_tokens = set().union(*(
+                        self._tokenize_text(content_overviews[index])
+                        for index in reference_indices
+                    ))
+
+                content_genres = [
+                    self._get_movie_search_terms(movie)['genres']
+                    for movie in movies
+                ]
+                genre_scores = np.zeros(len(movies))
+                if any(genre.strip() for genre in content_genres):
+                    genre_vectorizer = TfidfVectorizer(
+                        stop_words=stop_words,
+                        ngram_range=(1, 2),
+                        min_df=1,
+                        max_df=0.95,
+                        sublinear_tf=True,
+                    )
+                    genre_matrix = genre_vectorizer.fit_transform(content_genres)
+                    genre_profile = normalize(
+                        np.asarray(genre_matrix[reference_indices].mean(axis=0))
+                    )
+                    genre_scores = linear_kernel(genre_profile, genre_matrix).ravel()
+
+                for index, synopsis_score in enumerate(synopsis_scores):
+                    if index in reference_indices or index in matched_indices:
+                        continue
+                    candidate_tokens = self._tokenize_text(content_overviews[index])
+                    shared_terms = reference_tokens.intersection(candidate_tokens)
+                    candidate = movies[index].copy()
+                    combined_score = 0.9 * synopsis_score + 0.1 * genre_scores[index]
+                    if synopsis_score >= 0.035 and len(shared_terms) >= 2:
+                        candidate['relevance'] = 'Mirip berdasarkan sinopsis'
+                        related_movies.append((float(combined_score), index, candidate))
+                    elif genre_scores[index] > 0:
+                        candidate['relevance'] = 'Mirip berdasarkan genre'
+                        fallback_movies.append((float(combined_score), index, candidate))
+
+            related_movies.sort(key=lambda item: (-item[0], item[1]))
+            fallback_movies.sort(key=lambda item: (-item[0], item[1]))
+            results = (
+                [movie for _, _, movie in title_matches]
+                + [movie for _, _, movie in title_variant_matches]
+                + [movie for _, _, movie in overview_matches]
+                + [movie for _, _, movie in related_movies]
+                + [movie for _, _, movie in genre_matches]
+                + [movie for _, _, movie in fallback_movies]
+            )
+            if len(results) < top_n:
+                seen_movies = {
+                    str(movie.get('id'))
+                    if movie.get('id') is not None
+                    else str(movie.get('title', '')).casefold()
+                    for movie in results
+                }
+                for movie in self.search_movies(query, movies):
+                    movie_key = (
+                        str(movie.get('id'))
+                        if movie.get('id') is not None
+                        else str(movie.get('title', '')).casefold()
+                    )
+                    if movie_key in seen_movies:
+                        continue
+                    seen_movies.add(movie_key)
+                    results.append(movie)
+                    if len(results) >= top_n:
+                        break
+            return results[:top_n]
+
         normalized_titles = [
             re.sub(r'[^a-z0-9]+', ' ', str(movie.get('title', '')).lower()).strip()
             for movie in movies
         ]
-        query_tokens = set(normalized_query.split())
         title_tokens = [set(title.split()) for title in normalized_titles]
         reference_indices = [
             index for index, title in enumerate(normalized_titles)
@@ -758,8 +1521,110 @@ class MovieService:
             reference_indices,
             movies,
             top_n,
-            include_references=True
+            include_references=True,
         )
+
+    def fill_search_results(self, query, movies, results, top_n=20):
+        """Fill generic searches, but don't pad title recommendations with unrelated movies."""
+        ranked_results = list(results or [])
+        if len(ranked_results) >= top_n or len(movies) < top_n:
+            return ranked_results[:top_n]
+
+        def movie_key(movie):
+            movie_id = movie.get('id')
+            if movie_id is not None:
+                return ('id', str(movie_id))
+            return (
+                'title',
+                re.sub(r'[^a-z0-9]+', ' ', str(movie.get('title', '')).lower()).strip(),
+            )
+
+        seen = {movie_key(movie) for movie in ranked_results}
+        normalized_query = re.sub(
+            r'[^a-z0-9]+', ' ', str(query).lower()
+        ).strip()
+        reference_indices = [
+            index for index, movie in enumerate(movies)
+            if re.sub(
+                r'[^a-z0-9]+',
+                ' ',
+                str(movie.get('title', '')).lower(),
+            ).strip() == normalized_query
+        ]
+        if not reference_indices and len(self._tokenize_text(query)) == 1:
+            query_token = next(iter(self._tokenize_text(query)))
+            reference_indices = [
+                index for index, movie in enumerate(movies)
+                if query_token in self._tokenize_text(movie.get('title', ''))
+            ]
+
+        if reference_indices:
+            remaining = self._recommend_content_similar(
+                reference_indices,
+                movies,
+                len(movies),
+            )
+        else:
+            remaining = self.search_movies(query, movies)
+        for movie in remaining:
+            key = movie_key(movie)
+            if key in seen:
+                continue
+            seen.add(key)
+            ranked_results.append(movie)
+            if len(ranked_results) >= top_n:
+                break
+
+        if reference_indices:
+            return ranked_results[:top_n]
+
+        if len(ranked_results) < top_n:
+            fallback_candidates = []
+            query_tokens = self._tokenize_text(query)
+            for index, movie in enumerate(movies):
+                if not isinstance(movie, dict):
+                    continue
+                key = movie_key(movie)
+                if key in seen:
+                    continue
+                fallback_movie = movie.copy()
+                terms = self._get_movie_search_terms(movie)
+                query_tokens = self._tokenize_text(query)
+                title_tokens = self._tokenize_text(terms['title'])
+                if len(query_tokens) == 1:
+                    title_score = (
+                        self._title_keyword_match_score(
+                            next(iter(query_tokens)),
+                            title_tokens,
+                        )
+                        / 3
+                    )
+                else:
+                    title_score = self._title_similarity(query, terms['title'])
+                genre_tokens = self._tokenize_text(terms['genres'])
+                genre_score = (
+                    len(query_tokens.intersection(genre_tokens))
+                    / max(len(query_tokens), 1)
+                )
+                fallback_movie['relevance'] = (
+                    'Belum ada kecocokan kuat pada judul, sinopsis, genre, '
+                    'atau sutradara'
+                )
+                fallback_candidates.append((
+                    max(title_score, genre_score),
+                    index,
+                    fallback_movie,
+                ))
+
+            fallback_candidates.sort(key=lambda item: (-item[0], item[1]))
+            for _, _, fallback_movie in fallback_candidates:
+                key = movie_key(fallback_movie)
+                seen.add(key)
+                ranked_results.append(fallback_movie)
+                if len(ranked_results) >= top_n:
+                    break
+
+        return ranked_results[:top_n]
 
 
     def _init_tfidf_vectors(self, movies):
@@ -802,7 +1667,7 @@ class MovieService:
     def search_movies(self, query, movies, min_results=5):
         """
         Cari film menggunakan TF-IDF dengan bobot judul 3x untuk pencarian yang lebih relevan.
-        Mengembalikan top 20 film berdasarkan skor similarity dengan judul, sinopsis, dan genre.
+        Mengembalikan film berdasarkan kemiripan judul, sinopsis, genre, dan sutradara.
         Hanya film yang benar-benar relevan (ada token overlap atau similarity tinggi) yang ditampilkan.
         """
         try:
@@ -839,9 +1704,10 @@ class MovieService:
             if not isinstance(movie, dict):
                 continue
             
-            # Buat search document dengan judul 3x lebih kuat
+            # Buat search document dengan judul 3x lebih kuat.
             title = str(movie.get('title', '')).lower()
             overview = str(movie.get('overview', '')).lower()
+            director = str(movie.get('director', '') or '').lower().strip()
             
             # Parsing genres
             genres_list = []
@@ -852,14 +1718,17 @@ class MovieService:
                     genres_list.append(str(genre).lower())
             genres_text = ' '.join(genres_list)
             
-            # Bobot judul 3x: ulang judul sebanyak 3 kali
-            search_doc = f"{title} {title} {title} {overview} {genres_text}"
-            
+            # Bobot judul 3x lebih besar daripada genre agar hasil lebih sesuai judul.
+            search_doc = (
+                f"{title} {title} {title} {overview} {genres_text} {director}"
+            )
+
             processed_movies.append({
                 'movie': movie,
                 'title': title,
                 'overview': overview,
                 'genres': genres_text,
+                'director': director,
                 'search_doc': search_doc
             })
             search_docs.append(search_doc)
@@ -924,7 +1793,17 @@ class MovieService:
 
         # Ranking hasil berdasarkan similarity score dengan validation
         scored_movies = []
-        
+        fallback_movies = []
+        query_stop_words = {
+            'film', 'movie', 'movies', 'yang', 'di', 'ke', 'dari', 'dan',
+            'atau', 'dengan', 'untuk', 'pada', 'the', 'and', 'of', 'to',
+            'in', 'a', 'is', 'it', 'that', 'was', 'as', 'on',
+        }
+        content_query_tokens = query_tokens - query_stop_words
+        if not content_query_tokens:
+            content_query_tokens = query_tokens
+        required_coverage = 1.0 if len(content_query_tokens) == 1 else 0.5
+
         for idx, score in enumerate(similarity_scores):
             if idx >= len(processed_movies):
                 continue
@@ -939,45 +1818,69 @@ class MovieService:
             title_tokens = self._tokenize_text(title)
             overview_tokens = self._tokenize_text(overview)
             genre_tokens = self._tokenize_text(genres_text)
+            director_tokens = self._tokenize_text(movie_data['director'])
             
-            has_title_overlap = bool(query_tokens.intersection(title_tokens))
-            has_overview_overlap = bool(query_tokens.intersection(overview_tokens))
-            has_genre_overlap = bool(query_tokens.intersection(genre_tokens))
             query_title_sim = self._title_similarity(query_lower, title)
             query_overview_sim = self._calculate_string_similarity(query_lower, overview)
             phrase_in_title = self._phrase_match(query_lower, title)
             phrase_in_overview = self._phrase_match(query_lower, overview)
-            query_substring_in_title = any(tok in title for tok in query_tokens)
-            query_substring_in_overview = any(tok in overview for tok in query_tokens)
-            
-            if not (has_title_overlap or has_overview_overlap or has_genre_overlap or query_substring_in_title or query_substring_in_overview):
-                if score < 0.75 and query_title_sim < 0.25:
-                    continue
-            elif has_genre_overlap and not (has_title_overlap or has_overview_overlap or query_substring_in_title or query_substring_in_overview):
-                if score < 0.70:
-                    continue
-            
-            title_score = 0.0
-            if has_title_overlap:
-                overlap_ratio = len(query_tokens.intersection(title_tokens)) / max(len(query_tokens), 1)
-                title_score = 0.30 + overlap_ratio * 0.20
-            elif query_substring_in_title:
-                title_score = 0.22 + query_title_sim * 0.20
-            else:
-                title_score = query_title_sim * 0.18
-            
-            overview_score = 0.0
-            if has_overview_overlap:
-                overlap_ratio = len(query_tokens.intersection(overview_tokens)) / max(len(query_tokens), 1)
-                overview_score = 0.18 + overlap_ratio * 0.18
-            elif query_substring_in_overview:
-                overview_score = 0.12 + query_overview_sim * 0.15
-            else:
-                overview_score = query_overview_sim * 0.10
-            
-            genre_score = (len(query_tokens.intersection(genre_tokens)) / max(len(query_tokens), 1)) * 0.15
-            
-            final_score = (score * 0.30) + title_score + overview_score + genre_score
+
+            title_overlap = (
+                len(content_query_tokens.intersection(title_tokens))
+                / max(len(content_query_tokens), 1)
+            )
+            overview_overlap = (
+                len(content_query_tokens.intersection(overview_tokens))
+                / max(len(content_query_tokens), 1)
+            )
+            genre_overlap = (
+                len(content_query_tokens.intersection(genre_tokens))
+                / max(len(content_query_tokens), 1)
+            )
+            director_overlap = (
+                len(content_query_tokens.intersection(director_tokens))
+                / max(len(content_query_tokens), 1)
+            )
+            title_keyword_score = (
+                self._title_keyword_match_score(
+                    next(iter(content_query_tokens)), title_tokens
+                )
+                if len(content_query_tokens) == 1
+                else 0.0
+            )
+            has_title_match = (
+                phrase_in_title
+                or title_overlap >= required_coverage
+                or title_keyword_score > 0
+                or query_title_sim >= 0.85
+            )
+            has_overview_match = (
+                phrase_in_overview
+                or overview_overlap >= required_coverage
+                or query_overview_sim >= 0.65
+            )
+            has_genre_match = genre_overlap >= required_coverage
+            has_director_match = director_overlap >= required_coverage
+
+            has_direct_match = (
+                has_title_match
+                or has_overview_match
+                or has_genre_match
+                or has_director_match
+            )
+
+            title_score = max(
+                title_overlap,
+                title_keyword_score / 3,
+                query_title_sim if query_title_sim >= 0.85 else 0.0,
+            )
+            overview_score = max(overview_overlap, query_overview_sim)
+            genre_score = genre_overlap
+            director_score = director_overlap
+            weighted_content_score = (
+                3 * title_score + overview_score + genre_score + director_score
+            ) / 6
+            final_score = (score * 0.25) + (weighted_content_score * 0.75)
             if phrase_in_title:
                 final_score += 0.05
             if phrase_in_overview:
@@ -988,115 +1891,37 @@ class MovieService:
                 if 'dilan' in title or 'milea' in title or 'dilan' in overview or 'milea' in overview:
                     final_score += 0.08
             final_score = min(1.0, final_score)
-            if final_score < 0.12:
-                continue
-            
             validated = validate_movie_data(movie.copy())
             if not validated:
                 continue
             
             # Tentukan kategori relevansi berdasarkan score
-            if final_score >= 0.85:
-                validated['relevance'] = 'Sangat Relevan'
-            elif final_score >= 0.65:
-                validated['relevance'] = 'Relevan'
-            elif final_score >= 0.40:
-                validated['relevance'] = 'Cukup Relevan'
+            evidence = []
+            if has_title_match:
+                evidence.append('judul')
+            if has_overview_match:
+                evidence.append('sinopsis')
+            if has_genre_match:
+                evidence.append('genre')
+            if has_director_match:
+                evidence.append('sutradara')
+            if has_direct_match and final_score >= 0.12:
+                validated['relevance'] = self._format_similarity_label(evidence)
+                scored_movies.append((final_score, validated))
             else:
-                validated['relevance'] = 'Mungkin Relevan'
-            
-            scored_movies.append((final_score, validated))
+                validated['relevance'] = ''
+                fallback_movies.append((final_score, validated))
         
         # Urutkan berdasarkan score descending
         scored_movies.sort(key=lambda x: x[0], reverse=True)
-        direct_results = [m[1] for m in scored_movies]
-        direct_ids = {m.get('id') for m in direct_results}
-
-        # Jika sudah cukup atau data terlampaui, kembalikan top 20 langsung
-        if len(direct_results) >= 20:
-            results = direct_results[:20]
-            logger.info(f"Ditemukan {len(results)} film yang relevan untuk query '{query}'")
-            return results
-
-        # Jika langsung belum 20, tambahkan rekomendasi berdasar film-film terbaik
-        remaining_movies = [item['movie'] for item in processed_movies if item['movie'].get('id') not in direct_ids]
-        recommendation_pool = []
-        base_movies = direct_results[:10] if direct_results else []
-
-        # Jika tidak ada hasil langsung, gunakan top 10 dokumen paling mirip dari TF-IDF sebagai base
-        if not base_movies and scored_movies:
-            base_movies = [scored_movies[i][1] for i in range(min(10, len(scored_movies)))]
-
-        def token_overlap_ratio(tokens_a, tokens_b):
-            if not tokens_a or not tokens_b:
-                return 0.0
-            overlap = tokens_a.intersection(tokens_b)
-            return len(overlap) / max(len(tokens_a), len(tokens_b))
-
-        for movie in remaining_movies:
-            if not isinstance(movie, dict):
-                continue
-
-            candidate_title = str(movie.get('title', '')).lower()
-            candidate_overview = str(movie.get('overview', '')).lower()
-            candidate_genres = ' '.join(
-                genre.get('name', '').lower() if isinstance(genre, dict) else str(genre).lower()
-                for genre in movie.get('genres', [])
-            )
-
-            title_tokens = self._tokenize_text(candidate_title)
-            overview_tokens = self._tokenize_text(candidate_overview)
-            genre_tokens = self._tokenize_text(candidate_genres)
-
-            best_title = 0.0
-            best_overview = 0.0
-            best_genre = 0.0
-            for base in base_movies:
-                base_title = str(base.get('title', '')).lower()
-                base_overview = str(base.get('overview', '')).lower()
-                base_genres = ' '.join(
-                    genre.get('name', '').lower() if isinstance(genre, dict) else str(genre).lower()
-                    for genre in base.get('genres', [])
-                )
-
-                title_sim = self._title_similarity(candidate_title, base_title)
-                best_title = max(best_title, title_sim)
-
-                overview_tokens_base = self._tokenize_text(base_overview)
-                best_overview = max(best_overview, token_overlap_ratio(overview_tokens, overview_tokens_base))
-
-                genre_tokens_base = self._tokenize_text(base_genres)
-                best_genre = max(best_genre, token_overlap_ratio(genre_tokens, genre_tokens_base))
-
-            recommend_score = (best_title * 0.5) + (best_overview * 0.3) + (best_genre * 0.2)
-
-            title_overlap = bool(query_tokens.intersection(title_tokens))
-            overview_overlap = bool(query_tokens.intersection(overview_tokens))
-            genre_overlap = bool(query_tokens.intersection(genre_tokens))
-            if title_overlap or overview_overlap or genre_overlap:
-                recommend_score += 0.08
-            if query_substring_in_title := any(tok in candidate_title for tok in query_tokens):
-                recommend_score += 0.05
-            if query_substring_in_overview := any(tok in candidate_overview for tok in query_tokens):
-                recommend_score += 0.03
-            if {'dilan', 'milea'}.intersection(query_tokens):
-                if 'dilan' in candidate_title or 'milea' in candidate_title or 'dilan' in candidate_overview or 'milea' in candidate_overview:
-                    recommend_score += 0.10
-            if best_title < 0.15 and best_overview < 0.12 and best_genre < 0.16:
-                continue
-
-            if recommend_score > 0.08:
-                validated = validate_movie_data(movie.copy())
-                if not validated:
-                    continue
-                recommendation_pool.append((recommend_score, validated))
-
-        recommendation_pool.sort(key=lambda x: x[0], reverse=True)
-        recommendation_results = [item[1] for item in recommendation_pool[:max(0, 20 - len(direct_results))]]
-
-        results = direct_results + recommendation_results
-        results = results[:20]
-        logger.info(f"Ditemukan {len(results)} film yang relevan untuk query '{query}' (langsung {len(direct_results)} + rekomendasi {len(recommendation_results)})")
+        fallback_movies.sort(key=lambda x: x[0], reverse=True)
+        ranked_movies = (
+            scored_movies + fallback_movies
+            if len(processed_movies) >= 20
+            else scored_movies
+        )
+        results = [movie for _, movie in ranked_movies][:20]
+        logger.info(f"Ditemukan {len(results)} film untuk query '{query}'")
         return results
 
 
@@ -1240,9 +2065,9 @@ class MovieService:
         
         return results
 
-    def recommend_movies(self, movie_id, movies, top_n=10):
+    def recommend_movies(self, movie_id, movies, top_n=20):
         """
-        Rekomendasikan film serupa berdasarkan konten menggunakan TF-IDF dan metadata
+        Rekomendasikan film serupa dan urutkan berdasarkan skor PCC.
         
         Args:
             movie_id: ID film target
@@ -1257,7 +2082,36 @@ class MovieService:
                 index for index, movie in enumerate(movies)
                 if str(movie.get('id')) == str(movie_id)
             ]
-            return self._recommend_content_similar(reference_indices, movies, top_n)
+            candidates = self._recommend_content_similar(
+                reference_indices,
+                movies,
+                len(movies),
+            )
+            candidates = [
+                candidate for candidate in candidates
+                if candidate.get('relevance')
+            ]
+            if not candidates:
+                return []
+
+            reference_text = ' '.join(
+                self._get_movie_search_terms(movies[index])['recommendation_terms']
+                for index in reference_indices
+            )
+            pcc_scores = self.calculate_pcc_scores(
+                reference_text,
+                candidates,
+                terms_key='recommendation_terms',
+            )
+            for candidate in candidates:
+                candidate_id = candidate.get('id')
+                candidate['pcc_similarity'] = (
+                    pcc_scores.get(str(candidate_id), 0.0)
+                    if candidate_id is not None else 0.0
+                )
+
+            candidates = self.sort_search_results_by_pcc(candidates)
+            return candidates[:top_n]
         except Exception as e:
             logger.error(f"Error in recommend_movies: {str(e)}", exc_info=True)
             return []
@@ -1531,6 +2385,3 @@ class MovieService:
 
 # Global instance
 movie_service = MovieService()
-
-
-

@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
-"""
-Generate Newest Tab Diagram
-Menampilkan diagram hasil pencarian Newest Tab
-Menggunakan TF-IDF + PCC + Newest Score (berdasarkan tanggal rilis terbaru)
-"""
+"""Generate a diagram of the web's Newest tab."""
 
 import sys
 import os
@@ -44,27 +40,17 @@ def generate_newest_diagram():
         print(f"   Total movies loaded : {len(movies)}")
 
         # =====================================================
-        # QUERY
+        # Match /api/movies?type=newest: filter, sort, then take page one.
         # =====================================================
 
-        query = "dilan 1990"
-
-        print(f"\n2. Searching movies with query : '{query}'")
-
-        # Menggunakan search asli seperti web
-        search_results = movie_service.search_movies(
-            query=query,
-            movies=movies,
-            min_results=5
-        )
-
-        print(f"   Search results found : {len(search_results)}")
+        filtered_movies = movie_service.filter_movies(movies, '', '')
+        print(f"\n2. Movies after web filters : {len(filtered_movies)}")
 
         # =====================================================
         # VALIDASI
         # =====================================================
 
-        if not search_results:
+        if not filtered_movies:
 
             print("\n❌ No movies found")
             return
@@ -85,17 +71,13 @@ def generate_newest_diagram():
             except (ValueError, TypeError):
                 return datetime.min
 
-        newest_results = sorted(
-            search_results,
-            key=get_release_date,
-            reverse=True
-        )
+        newest_results = movie_service.sort_movies(filtered_movies, 'newest')
 
         # =====================================================
         # HASIL DINAMIS
         # =====================================================
 
-        top_movies = newest_results
+        top_movies = newest_results[:20]
 
         total_movies = len(top_movies)
 
@@ -109,36 +91,26 @@ def generate_newest_diagram():
         release_dates = []
         vote_averages = []
         vote_counts = []
+        parsed_dates = []
 
         for movie in top_movies:
-
             title = movie.get('title', 'Unknown')
-
-            # Potong judul terlalu panjang
             if len(title) > 35:
                 title = title[:35] + '...'
-
             titles.append(title)
 
-            # Gunakan release_date field
-            release_date = movie.get('release_date', 'Unknown')
-            release_dates.append(release_date)
-            
-            vote_averages.append(float(movie.get('vote_average', 0)))
-            vote_counts.append(int(movie.get('vote_count', 0)))
+            release_date = movie.get('release_date', '')
+            release_dates.append(release_date or 'Unknown')
+            parsed_dates.append(get_release_date(movie))
 
-        # =====================================================
-        # SORT DESCENDING BY RELEASE DATE
-        # =====================================================
-
-        combined = list(zip(titles, release_dates, vote_averages, vote_counts))
-
-        combined.sort(
-            key=lambda x: x[1] if x[1] != 'Unknown' else '1900-01-01',
-            reverse=True
-        )
-
-        titles, release_dates, vote_averages, vote_counts = zip(*combined)
+            try:
+                vote_averages.append(float(movie.get('vote_average') or 0))
+            except (TypeError, ValueError):
+                vote_averages.append(0.0)
+            try:
+                vote_counts.append(int(float(movie.get('vote_count') or 0)))
+            except (TypeError, ValueError):
+                vote_counts.append(0)
 
         # =====================================================
         # FIGURE SIZE
@@ -149,7 +121,7 @@ def generate_newest_diagram():
         fig, ax = plt.subplots(
             figsize=(16, fig_height)
         )
-        fig.subplots_adjust(left=0.38, right=0.80, top=0.86, bottom=0.20)
+        fig.subplots_adjust(left=0.38, right=0.95, top=0.86, bottom=0.20)
 
         # =====================================================
         # Y POSITION
@@ -161,23 +133,14 @@ def generate_newest_diagram():
         # HORIZONTAL BAR CHART
         # =====================================================
 
-        # Hitung hari sejak tanggal rilis terawal untuk panjang bar
-        def get_release_date(movie):
-            release_date = movie.get('release_date', '')
-            if not release_date:
-                return datetime.min
-            try:
-                return datetime.strptime(release_date, '%Y-%m-%d')
-            except (ValueError, TypeError):
-                return datetime.min
-
-        # Cari tanggal terawal
-        dates = [get_release_date(movie) for movie in top_movies]
-        earliest_date = min(dates)
-        
-        # Hitung hari sejak tanggal terawal, tambahkan minimum value agar tidak kosong
-        bar_values = [(date - earliest_date).days + 100 for date in dates]
-        plot_values = [max(val, 0.01) for val in bar_values]
+        valid_dates = [date for date in parsed_dates if date != datetime.min]
+        earliest_date = min(valid_dates) if valid_dates else None
+        bar_values = [
+            (date - earliest_date).days if earliest_date and date != datetime.min else 0
+            for date in parsed_dates
+        ]
+        max_bar_value = max(bar_values, default=0)
+        x_limit = max_bar_value * 1.2 if max_bar_value else 1
         
         bar_colors = [
             '#08306b' if i == 0 else
@@ -189,7 +152,7 @@ def generate_newest_diagram():
 
         bars = ax.barh(
             y_pos,
-            plot_values,
+            bar_values,
             color=bar_colors,
             edgecolor='none',
             height=0.62,
@@ -200,12 +163,9 @@ def generate_newest_diagram():
         # VALUE LABEL (RELEASE DATE)
         # =====================================================
 
-        max_bar_value = max(plot_values) if plot_values else 1
-        x_limit = max_bar_value * 1.25 if max_bar_value > 0 else 1
-
         for i, (date, bar) in enumerate(zip(release_dates, bars)):
             width = bar.get_width()
-            label_x = width * 1.06 if width > 0.05 else width + 0.03
+            label_x = max(width * 1.02, max_bar_value * 0.01)
             ha = 'left'
             label_color = '#222222'
 
@@ -242,22 +202,21 @@ def generate_newest_diagram():
         # =====================================================
 
         ax.invert_yaxis()
-        ax.set_xscale('log')
-        ax.set_xlim(0.01, x_limit)
+        ax.set_xlim(0, x_limit)
 
         # =====================================================
         # TITLE
         # =====================================================
 
         fig.suptitle(
-            f'Hasil Film Terbaru Berdasarkan Query "{query}"',
+            'Hasil Film Terbaru pada Tab Web',
             fontsize=22,
             fontweight='bold',
             y=0.98
         )
 
         ax.set_title(
-            'Top 20 film terbaru berdasarkan tanggal rilis (log scale)',
+            '20 film teratas berdasarkan tanggal rilis terbaru',
             fontsize=12,
             color='#444444',
             pad=24,
@@ -269,7 +228,7 @@ def generate_newest_diagram():
         # =====================================================
 
         ax.set_xlabel(
-            'Hari Sejak Rilis Terawal [skala log]',
+            'Hari sejak tanggal rilis terawal',
             fontsize=13,
             fontweight='bold'
         )
@@ -302,7 +261,7 @@ def generate_newest_diagram():
         ax.tick_params(axis='x', labelsize=11)
         ax.tick_params(axis='y', labelsize=10)
         ax.set_axisbelow(True)
-        ax.xaxis.set_major_locator(mticker.LogLocator(base=10.0, subs=(1.0,), numticks=6))
+        ax.xaxis.set_major_locator(mticker.MaxNLocator(6, integer=True))
         ax.xaxis.set_major_formatter(mticker.FormatStrFormatter('%.0f'))
 
         # =====================================================
@@ -311,9 +270,9 @@ def generate_newest_diagram():
 
         info_text = (
             f"Total Film : {len(titles)}\n"
-            "Source : TMDb Dataset\n"
-            "Search : TF-IDF + PCC\n"
-            "Sorting : Release Date (Newest First)"
+            "Sumber : Katalog film web\n"
+            "Filter : Semua genre dan tahun\n"
+            "Urutan : Tanggal rilis terbaru"
         )
 
         fig.text(
@@ -339,9 +298,10 @@ def generate_newest_diagram():
         # OUTPUT FILE
         # =====================================================
 
-        png_file = f'newest_tab_{query.replace(" ", "_")}.png'
-
-        pdf_file = f'newest_tab_{query.replace(" ", "_")}.pdf'
+        output_dir = os.path.join(os.path.dirname(__file__), 'hasil_diagram')
+        os.makedirs(output_dir, exist_ok=True)
+        png_file = os.path.join(output_dir, 'newest_tab_all_movies.png')
+        pdf_file = os.path.join(output_dir, 'newest_tab_all_movies.pdf')
 
         # =====================================================
         # SAVE PNG

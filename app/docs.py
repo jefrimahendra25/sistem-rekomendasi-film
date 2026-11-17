@@ -371,7 +371,7 @@ def api_documentation():
                                     <td><code>top_n</code></td>
                                     <td>integer</td>
                                     <td>No</td>
-                                    <td>Jumlah rekomendasi (default: 10, max: 20)</td>
+                                    <td>Jumlah rekomendasi (default: 20, max: 20)</td>
                                 </tr>
                             </tbody>
                         </table>
